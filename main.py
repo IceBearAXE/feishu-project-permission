@@ -4,12 +4,15 @@ import os
 import json
 import re
 import urllib.request
+import urllib.error
 
 app = FastAPI()
 
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 FEISHU_APP_ID = os.getenv("FEISHU_APP_ID", "")
 FEISHU_APP_SECRET = os.getenv("FEISHU_APP_SECRET", "")
+BITABLE_APP_TOKEN = os.getenv("BITABLE_APP_TOKEN", "")
+BITABLE_TABLE_ID = os.getenv("BITABLE_TABLE_ID", "")
 
 
 @app.get("/")
@@ -17,13 +20,22 @@ async def root():
     return {"ok": True, "message": "service is running"}
 
 
-def parse_loose_feishu_body(raw_text):
+def parse_loose_feishu_body(raw_text: str) -> dict:
+    """
+    兼容飞书自动化发来的这种 body：
+    {
+      "record_id": recxxxx,
+      "project_code": AUTO-TEST-011,
+      "project_name": AUTO-TEST-011,
+      "folder_token": TOKEN-AUTO-011
+    }
+    """
     result = {}
 
     for line in raw_text.splitlines():
         line = line.strip()
 
-        if not line or line == "{" or line == "}":
+        if not line or line in ("{", "}"):
             continue
 
         if line.endswith(","):
@@ -47,7 +59,7 @@ def parse_loose_feishu_body(raw_text):
     return result
 
 
-def feishu_post_json(url, payload, tenant_access_token=None):
+def http_json_request(url: str, method: str, payload: dict, tenant_access_token: str | None = None) -> dict:
     data = json.dumps(payload).encode("utf-8")
     headers = {"Content-Type": "application/json"}
 
@@ -58,17 +70,19 @@ def feishu_post_json(url, payload, tenant_access_token=None):
         url=url,
         data=data,
         headers=headers,
-        method="POST"
+        method=method
     )
 
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        text = resp.read().decode("utf-8")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            text = resp.read().decode("utf-8")
+            return json.loads(text)
+    except urllib.error.HTTPError as e:
+        err_text = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"HTTPError {e.code}: {err_text}") from e
 
-    result = json.loads(text)
-    return result
 
-
-def get_feishu_tenant_access_token():
+def get_feishu_tenant_access_token() -> str:
     if not FEISHU_APP_ID or not FEISHU_APP_SECRET:
         raise RuntimeError("FEISHU_APP_ID or FEISHU_APP_SECRET is missing")
 
@@ -78,7 +92,7 @@ def get_feishu_tenant_access_token():
         "app_secret": FEISHU_APP_SECRET
     }
 
-    result = feishu_post_json(url, payload)
+    result = http_json_request(url=url, method="POST", payload=payload)
 
     if result.get("code") != 0:
         raise RuntimeError(f"get tenant_access_token failed: {result}")
@@ -90,14 +104,19 @@ def get_feishu_tenant_access_token():
     return token
 
 
-def create_user_group(tenant_access_token, group_name, description=""):
+def create_user_group(tenant_access_token: str, group_name: str, description: str = "") -> dict:
     url = "https://open.feishu.cn/open-apis/contact/v3/group"
     payload = {
         "name": group_name,
         "description": description
     }
 
-    result = feishu_post_json(url, payload, tenant_access_token)
+    result = http_json_request(
+        url=url,
+        method="POST",
+        payload=payload,
+        tenant_access_token=tenant_access_token
+    )
 
     if result.get("code") != 0:
         raise RuntimeError(f"create user group failed: {result}")
@@ -111,6 +130,32 @@ def create_user_group(tenant_access_token, group_name, description=""):
         "group_id": group_id,
         "raw": result
     }
+
+
+def update_bitable_record(tenant_access_token: str, record_id: str, fields: dict) -> dict:
+    if not BITABLE_APP_TOKEN or not BITABLE_TABLE_ID:
+        raise RuntimeError("BITABLE_APP_TOKEN or BITABLE_TABLE_ID is missing")
+
+    url = (
+        f"https://open.feishu.cn/open-apis/bitable/v1/apps/{BITABLE_APP_TOKEN}"
+        f"/tables/{BITABLE_TABLE_ID}/records/{record_id}"
+    )
+
+    payload = {
+        "fields": fields
+    }
+
+    result = http_json_request(
+        url=url,
+        method="PUT",
+        payload=payload,
+        tenant_access_token=tenant_access_token
+    )
+
+    if result.get("code") != 0:
+        raise RuntimeError(f"update bitable record failed: {result}")
+
+    return result
 
 
 @app.post("/init_project")
@@ -142,9 +187,16 @@ async def init_project(
     print("parsed body:")
     print(json.dumps(body, ensure_ascii=False, indent=2))
 
-    project_code = body.get("project_code", "").strip()
-    project_name = body.get("project_name", "").strip()
-    folder_token = body.get("folder_token", "").strip()
+    record_id = str(body.get("record_id", "")).strip()
+    project_code = str(body.get("project_code", "")).strip()
+    project_name = str(body.get("project_name", "")).strip()
+    folder_token = str(body.get("folder_token", "")).strip()
+
+    if not record_id:
+        return JSONResponse(
+            status_code=400,
+            content={"ok": False, "error": "record_id is empty"}
+        )
 
     if not project_name:
         return JSONResponse(
@@ -200,11 +252,44 @@ async def init_project(
             }
         )
 
-    return JSONResponse(content={
-        "ok": True,
-        "message": "groups created",
-        "project_code": project_code,
-        "project_name": project_name,
-        "folder_token": folder_token,
-        "groups": created_groups
-    })
+    # 这里的字段名必须和你表里的列名完全一致
+    fields_to_update = {
+        "负责人组ID": created_groups[0]["group_id"],
+        "员工组ID": created_groups[1]["group_id"],
+        "学生组ID": created_groups[2]["group_id"],
+        "总体单位ID": created_groups[3]["group_id"],
+        "初始化状态": "成功"
+    }
+
+    try:
+        update_result = update_bitable_record(
+            tenant_access_token=tenant_access_token,
+            record_id=record_id,
+            fields=fields_to_update
+        )
+        print("update bitable record success")
+        print(json.dumps(update_result, ensure_ascii=False, indent=2))
+    except Exception as e:
+        print("update bitable record failed:", repr(e))
+        return JSONResponse(
+            status_code=500,
+            content={
+                "ok": False,
+                "error": "update_bitable_record_failed",
+                "detail": str(e),
+                "record_id": record_id,
+                "created_groups": created_groups
+            }
+        )
+
+    return JSONResponse(
+        content={
+            "ok": True,
+            "message": "groups created and record updated",
+            "record_id": record_id,
+            "project_code": project_code,
+            "project_name": project_name,
+            "folder_token": folder_token,
+            "groups": created_groups
+        }
+    )
