@@ -8,28 +8,21 @@ app = FastAPI()
 
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 
+
 @app.get("/")
 async def root():
     return {"ok": True, "message": "service is running"}
 
-def parse_loose_feishu_body(raw_text: str) -> dict:
-    """
-    兼容飞书自动化发来的这种 body：
-    {
-      "project_code": AUTO-TEST-005,
-      "project_name": AUTO-TEST-005,
-      "folder_token": TOKEN-AUTO-006
-    }
-    """
+
+def parse_loose_feishu_body(raw_text):
     result = {}
 
     for line in raw_text.splitlines():
         line = line.strip()
 
-        if not line or line in ("{", "}"):
+        if not line or line == "{" or line == "}":
             continue
 
-        # 去掉行尾逗号
         if line.endswith(","):
             line = line[:-1]
 
@@ -40,7 +33,6 @@ def parse_loose_feishu_body(raw_text: str) -> dict:
         key = m.group(1).strip()
         value = m.group(2).strip()
 
-        # 如果值本来带引号，就去掉最外层引号
         if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
             value = value[1:-1]
 
@@ -51,12 +43,11 @@ def parse_loose_feishu_body(raw_text: str) -> dict:
 
     return result
 
+
 @app.post("/init_project")
-async def init_project(
-    request: Request,
-    x_token: str | None = Header(default=None),
-    x_source: str | None = Header(default=None),
-):
+async def init_project(request: Request,
+                       x_token: str = Header(default=None),
+                       x_source: str = Header(default=None)):
     if WEBHOOK_SECRET and x_token != WEBHOOK_SECRET:
         raise HTTPException(status_code=401, detail="invalid token")
 
@@ -80,10 +71,8 @@ async def init_project(
     print("parsed body:")
     print(json.dumps(body, ensure_ascii=False, indent=2))
 
-    return JSONResponse(
-        content={
-            "ok": True,
-            "message": "request received",
-            "parsed": body,
-        }
-    )
+    return JSONResponse(content={
+        "ok": True,
+        "message": "request received",
+        "parsed": body
+    })
