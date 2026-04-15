@@ -21,15 +21,6 @@ async def root():
 
 
 def parse_loose_feishu_body(raw_text: str) -> dict:
-    """
-    兼容飞书自动化发来的这种 body：
-    {
-      "record_id": recxxxx,
-      "project_code": AUTO-TEST-011,
-      "project_name": AUTO-TEST-011,
-      "folder_token": TOKEN-AUTO-011
-    }
-    """
     result = {}
 
     for line in raw_text.splitlines():
@@ -59,9 +50,14 @@ def parse_loose_feishu_body(raw_text: str) -> dict:
     return result
 
 
-def http_json_request(url: str, method: str, payload: dict, tenant_access_token: str | None = None) -> dict:
-    data = json.dumps(payload).encode("utf-8")
-    headers = {"Content-Type": "application/json"}
+def http_json_request(url: str, method: str = "GET", payload: dict | None = None, tenant_access_token: str | None = None) -> dict:
+    headers = {}
+
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    else:
+        data = None
 
     if tenant_access_token:
         headers["Authorization"] = f"Bearer {tenant_access_token}"
@@ -154,6 +150,27 @@ def update_bitable_record(tenant_access_token: str, record_id: str, fields: dict
 
     if result.get("code") != 0:
         raise RuntimeError(f"update bitable record failed: {result}")
+
+    return result
+
+
+def get_bitable_record(tenant_access_token: str, record_id: str) -> dict:
+    if not BITABLE_APP_TOKEN or not BITABLE_TABLE_ID:
+        raise RuntimeError("BITABLE_APP_TOKEN or BITABLE_TABLE_ID is missing")
+
+    url = (
+        f"https://open.feishu.cn/open-apis/bitable/v1/apps/{BITABLE_APP_TOKEN}"
+        f"/tables/{BITABLE_TABLE_ID}/records/{record_id}"
+    )
+
+    result = http_json_request(
+        url=url,
+        method="GET",
+        tenant_access_token=tenant_access_token
+    )
+
+    if result.get("code") != 0:
+        raise RuntimeError(f"get bitable record failed: {result}")
 
     return result
 
@@ -252,7 +269,6 @@ async def init_project(
             }
         )
 
-    # 这里的字段名必须和你表里的列名完全一致
     fields_to_update = {
         "负责人组ID": created_groups[0]["group_id"],
         "员工组ID": created_groups[1]["group_id"],
@@ -291,5 +307,84 @@ async def init_project(
             "project_name": project_name,
             "folder_token": folder_token,
             "groups": created_groups
+        }
+    )
+
+
+@app.post("/sync_members")
+async def sync_members(
+    request: Request,
+    x_token: str = Header(default=None),
+    x_source: str = Header(default=None)
+):
+    if WEBHOOK_SECRET and x_token != WEBHOOK_SECRET:
+        raise HTTPException(status_code=401, detail="invalid token")
+
+    raw_bytes = await request.body()
+    raw_text = raw_bytes.decode("utf-8", errors="replace")
+
+    print("====== received /sync_members ======")
+    print("x_source =", x_source)
+    print("content-type =", request.headers.get("content-type"))
+    print("raw body:")
+    print(raw_text)
+
+    try:
+        body = json.loads(raw_text)
+        print("parsed by normal json.loads")
+    except Exception as e:
+        print("JSON parse error:", repr(e))
+        body = parse_loose_feishu_body(raw_text)
+        print("parsed by loose parser")
+
+    print("parsed body:")
+    print(json.dumps(body, ensure_ascii=False, indent=2))
+
+    record_id = str(body.get("record_id", "")).strip()
+    if not record_id:
+        return JSONResponse(
+            status_code=400,
+            content={"ok": False, "error": "record_id is empty"}
+        )
+
+    try:
+        tenant_access_token = get_feishu_tenant_access_token()
+        print("get tenant_access_token success")
+        print("token prefix =", tenant_access_token[:20] + "...")
+    except Exception as e:
+        print("get tenant_access_token failed:", repr(e))
+        return JSONResponse(
+            status_code=500,
+            content={
+                "ok": False,
+                "error": "get_tenant_access_token_failed",
+                "detail": str(e)
+            }
+        )
+
+    try:
+        record_result = get_bitable_record(
+            tenant_access_token=tenant_access_token,
+            record_id=record_id
+        )
+        print("get bitable record success")
+        print(json.dumps(record_result, ensure_ascii=False, indent=2))
+    except Exception as e:
+        print("get bitable record failed:", repr(e))
+        return JSONResponse(
+            status_code=500,
+            content={
+                "ok": False,
+                "error": "get_bitable_record_failed",
+                "detail": str(e),
+                "record_id": record_id
+            }
+        )
+
+    return JSONResponse(
+        content={
+            "ok": True,
+            "message": "record fetched for sync",
+            "record_id": record_id
         }
     )
