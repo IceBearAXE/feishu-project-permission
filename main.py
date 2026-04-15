@@ -14,21 +14,40 @@ async def root():
 @app.post("/init_project")
 async def init_project(
     request: Request,
-    x_token: str | None = Header(default=None)
+    x_token: str | None = Header(default=None),
+    x_source: str | None = Header(default=None),
 ):
-    # 校验你和飞书自动化约定的密钥
     if WEBHOOK_SECRET and x_token != WEBHOOK_SECRET:
         raise HTTPException(status_code=401, detail="invalid token")
 
-    body = await request.json()
+    raw_bytes = await request.body()
+    raw_text = raw_bytes.decode("utf-8", errors="replace")
 
-    # 先只打印日志，确认飞书真的打进来了
     print("====== received /init_project ======")
+    print("x_source =", x_source)
+    print("content-type =", request.headers.get("content-type"))
+    print("raw body:")
+    print(raw_text)
+
+    try:
+        body = json.loads(raw_text)
+    except Exception as e:
+        print("JSON parse error:", repr(e))
+        return JSONResponse(
+            status_code=400,
+            content={
+                "ok": False,
+                "error": "invalid_json",
+                "raw_body": raw_text,
+            },
+        )
+
+    print("parsed json:")
     print(json.dumps(body, ensure_ascii=False, indent=2))
 
-    # 先返回成功，后面再加“创建用户组、授权文件夹、回写表格”
-    return JSONResponse({
-        "ok": True,
-        "message": "request received",
-        "received": body
-    })
+    return JSONResponse(
+        content={
+            "ok": True,
+            "message": "request received",
+        }
+    )
