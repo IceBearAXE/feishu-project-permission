@@ -3,10 +3,13 @@ from fastapi.responses import JSONResponse
 import os
 import json
 import re
+import urllib.request
 
 app = FastAPI()
 
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
+FEISHU_APP_ID = os.getenv("FEISHU_APP_ID", "")
+FEISHU_APP_SECRET = os.getenv("FEISHU_APP_SECRET", "")
 
 
 @app.get("/")
@@ -44,10 +47,44 @@ def parse_loose_feishu_body(raw_text):
     return result
 
 
+def get_feishu_tenant_access_token():
+    if not FEISHU_APP_ID or not FEISHU_APP_SECRET:
+        raise RuntimeError("FEISHU_APP_ID or FEISHU_APP_SECRET is missing")
+
+    url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
+    payload = json.dumps({
+        "app_id": FEISHU_APP_ID,
+        "app_secret": FEISHU_APP_SECRET
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        url=url,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST"
+    )
+
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        text = resp.read().decode("utf-8")
+
+    data = json.loads(text)
+
+    if data.get("code") != 0:
+        raise RuntimeError(f"get tenant_access_token failed: {data}")
+
+    token = data.get("tenant_access_token")
+    if not token:
+        raise RuntimeError(f"tenant_access_token missing: {data}")
+
+    return token, data
+
+
 @app.post("/init_project")
-async def init_project(request: Request,
-                       x_token: str = Header(default=None),
-                       x_source: str = Header(default=None)):
+async def init_project(
+    request: Request,
+    x_token: str = Header(default=None),
+    x_source: str = Header(default=None)
+):
     if WEBHOOK_SECRET and x_token != WEBHOOK_SECRET:
         raise HTTPException(status_code=401, detail="invalid token")
 
@@ -71,8 +108,24 @@ async def init_project(request: Request,
     print("parsed body:")
     print(json.dumps(body, ensure_ascii=False, indent=2))
 
+    try:
+        tenant_access_token, token_resp = get_feishu_tenant_access_token()
+        print("get tenant_access_token success")
+        print("token prefix =", tenant_access_token[:20] + "...")
+    except Exception as e:
+        print("get tenant_access_token failed:", repr(e))
+        return JSONResponse(
+            status_code=500,
+            content={
+                "ok": False,
+                "error": "get_tenant_access_token_failed",
+                "detail": str(e)
+            }
+        )
+
     return JSONResponse(content={
         "ok": True,
         "message": "request received",
-        "parsed": body
+        "parsed": body,
+        "token_ok": True
     })
