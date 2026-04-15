@@ -47,36 +47,70 @@ def parse_loose_feishu_body(raw_text):
     return result
 
 
-def get_feishu_tenant_access_token():
-    if not FEISHU_APP_ID or not FEISHU_APP_SECRET:
-        raise RuntimeError("FEISHU_APP_ID or FEISHU_APP_SECRET is missing")
+def feishu_post_json(url, payload, tenant_access_token=None):
+    data = json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
 
-    url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
-    payload = json.dumps({
-        "app_id": FEISHU_APP_ID,
-        "app_secret": FEISHU_APP_SECRET
-    }).encode("utf-8")
+    if tenant_access_token:
+        headers["Authorization"] = f"Bearer {tenant_access_token}"
 
     req = urllib.request.Request(
         url=url,
-        data=payload,
-        headers={"Content-Type": "application/json"},
+        data=data,
+        headers=headers,
         method="POST"
     )
 
     with urllib.request.urlopen(req, timeout=30) as resp:
         text = resp.read().decode("utf-8")
 
-    data = json.loads(text)
+    result = json.loads(text)
+    return result
 
-    if data.get("code") != 0:
-        raise RuntimeError(f"get tenant_access_token failed: {data}")
 
-    token = data.get("tenant_access_token")
+def get_feishu_tenant_access_token():
+    if not FEISHU_APP_ID or not FEISHU_APP_SECRET:
+        raise RuntimeError("FEISHU_APP_ID or FEISHU_APP_SECRET is missing")
+
+    url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
+    payload = {
+        "app_id": FEISHU_APP_ID,
+        "app_secret": FEISHU_APP_SECRET
+    }
+
+    result = feishu_post_json(url, payload)
+
+    if result.get("code") != 0:
+        raise RuntimeError(f"get tenant_access_token failed: {result}")
+
+    token = result.get("tenant_access_token")
     if not token:
-        raise RuntimeError(f"tenant_access_token missing: {data}")
+        raise RuntimeError(f"tenant_access_token missing: {result}")
 
-    return token, data
+    return token
+
+
+def create_user_group(tenant_access_token, group_name, description=""):
+    url = "https://open.feishu.cn/open-apis/contact/v3/group"
+    payload = {
+        "name": group_name,
+        "description": description
+    }
+
+    result = feishu_post_json(url, payload, tenant_access_token)
+
+    if result.get("code") != 0:
+        raise RuntimeError(f"create user group failed: {result}")
+
+    data = result.get("data", {})
+    group_id = data.get("group_id")
+    if not group_id:
+        raise RuntimeError(f"group_id missing in response: {result}")
+
+    return {
+        "group_id": group_id,
+        "raw": result
+    }
 
 
 @app.post("/init_project")
@@ -108,8 +142,18 @@ async def init_project(
     print("parsed body:")
     print(json.dumps(body, ensure_ascii=False, indent=2))
 
+    project_code = body.get("project_code", "").strip()
+    project_name = body.get("project_name", "").strip()
+    folder_token = body.get("folder_token", "").strip()
+
+    if not project_name:
+        return JSONResponse(
+            status_code=400,
+            content={"ok": False, "error": "project_name is empty"}
+        )
+
     try:
-        tenant_access_token, token_resp = get_feishu_tenant_access_token()
+        tenant_access_token = get_feishu_tenant_access_token()
         print("get tenant_access_token success")
         print("token prefix =", tenant_access_token[:20] + "...")
     except Exception as e:
@@ -123,9 +167,44 @@ async def init_project(
             }
         )
 
+    group_names = [
+        f"{project_name}-项目负责人",
+        f"{project_name}-员工",
+        f"{project_name}-学生",
+        f"{project_name}-总体单位",
+    ]
+
+    created_groups = []
+
+    try:
+        for group_name in group_names:
+            created = create_user_group(
+                tenant_access_token=tenant_access_token,
+                group_name=group_name,
+                description=f"项目 {project_name} 自动创建的权限用户组"
+            )
+            created_groups.append({
+                "name": group_name,
+                "group_id": created["group_id"]
+            })
+            print("created group:", group_name, "=>", created["group_id"])
+    except Exception as e:
+        print("create groups failed:", repr(e))
+        return JSONResponse(
+            status_code=500,
+            content={
+                "ok": False,
+                "error": "create_groups_failed",
+                "detail": str(e),
+                "created_groups": created_groups
+            }
+        )
+
     return JSONResponse(content={
         "ok": True,
-        "message": "request received",
-        "parsed": body,
-        "token_ok": True
+        "message": "groups created",
+        "project_code": project_code,
+        "project_name": project_name,
+        "folder_token": folder_token,
+        "groups": created_groups
     })
