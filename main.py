@@ -22,6 +22,9 @@ async def root():
 
 
 def parse_loose_feishu_body(raw_text: str) -> Dict[str, str]:
+    """
+    兼容飞书自动化发来的“伪 JSON”
+    """
     result: Dict[str, str] = {}
 
     for line in raw_text.splitlines():
@@ -158,12 +161,34 @@ def update_bitable_record(tenant_access_token: str, record_id: str, fields: Dict
     return result
 
 
+def get_bitable_record(tenant_access_token: str, record_id: str) -> Dict[str, Any]:
+    if not BITABLE_APP_TOKEN or not BITABLE_TABLE_ID:
+        raise RuntimeError("BITABLE_APP_TOKEN or BITABLE_TABLE_ID is missing")
+
+    url = (
+        f"https://open.feishu.cn/open-apis/bitable/v1/apps/{BITABLE_APP_TOKEN}"
+        f"/tables/{BITABLE_TABLE_ID}/records/{record_id}"
+    )
+
+    result = http_json_request(
+        url=url,
+        method="GET",
+        tenant_access_token=tenant_access_token
+    )
+
+    if result.get("code") != 0:
+        raise RuntimeError(f"get bitable record failed: {result}")
+
+    return result
+
+
 def normalize_text_to_list(value: Any) -> List[str]:
     """
     支持：
     1. 多行文本，一行一个链接
-    2. 分号分隔
-    3. 逗号分隔
+    2. 字面量 \\n
+    3. 分号分隔
+    4. 逗号分隔
     """
     if value is None:
         return []
@@ -176,7 +201,9 @@ def normalize_text_to_list(value: Any) -> List[str]:
     if not text:
         return []
 
+    text = text.replace("\\n", "\n")
     text = text.replace("；", ";").replace("，", ",")
+
     parts: List[str] = []
 
     for block in text.splitlines():
@@ -194,10 +221,6 @@ def normalize_text_to_list(value: Any) -> List[str]:
 
 
 def extract_link_from_hyperlink_field(value: Any) -> str:
-    """
-    超链接字段通常会读成：
-    {"link": "...", "text": "..."}
-    """
     if value is None:
         return ""
 
@@ -209,14 +232,7 @@ def extract_link_from_hyperlink_field(value: Any) -> str:
 
 def extract_drive_token_from_link(link: str) -> str:
     """
-    从飞书链接里提取 token。
-    兼容常见形态：
-    /folder/fldxxxx
-    /file/boxcnxxxx
-    /docx/doxcnxxxx
-    /sheet/shtcnxxxx
-    /wiki/wikcnxxxx
-    以及 query 里带 token 的情况
+    从飞书链接里提取 token
     """
     if not link:
         return ""
@@ -247,7 +263,6 @@ def extract_tokens_from_links_field(value: Any) -> List[str]:
         if token:
             tokens.append(token)
 
-    # 去重但保序
     seen: Set[str] = set()
     result: List[str] = []
     for t in tokens:
@@ -271,6 +286,7 @@ def extract_open_ids(field_value: Any) -> List[str]:
             member_id = str(item.get("id", "")).strip()
             if member_id:
                 result.append(member_id)
+
     return result
 
 
@@ -416,7 +432,6 @@ async def init_project(
     record_id = str(body.get("record_id", "")).strip()
     project_name = str(body.get("project_name", "")).strip()
 
-    # 过渡期：保留 folder_token，同时支持从总文件夹链接提取
     folder_token = str(body.get("folder_token", "")).strip()
     folder_link = str(body.get("folder_link", "")).strip()
     student_links = body.get("student_links", "")
@@ -452,38 +467,72 @@ async def init_project(
             content={"ok": False, "error": "get_tenant_access_token_failed", "detail": str(e)}
         )
 
-    group_names = [
-        f"{project_name}-项目负责人",
-        f"{project_name}-员工",
-        f"{project_name}-学生",
-        f"{project_name}-总体单位",
-    ]
-
-    created_groups: List[Dict[str, Any]] = []
-
     try:
-        for group_name in group_names:
-            created = create_user_group(
-                tenant_access_token=tenant_access_token,
-                group_name=group_name,
-                description=f"项目 {project_name} 自动创建的权限用户组"
-            )
-            created_groups.append({
-                "name": group_name,
-                "group_id": created["group_id"]
-            })
-            print("created group:", group_name, "=>", created["group_id"])
+        record_result = get_bitable_record(
+            tenant_access_token=tenant_access_token,
+            record_id=record_id
+        )
+        current_fields = record_result["data"]["record"]["fields"]
     except Exception as e:
-        print("create groups failed:", repr(e))
+        print("get current bitable record failed:", repr(e))
         return JSONResponse(
             status_code=500,
             content={
                 "ok": False,
-                "error": "create_groups_failed",
+                "error": "get_current_record_failed",
                 "detail": str(e),
-                "created_groups": created_groups
+                "record_id": record_id
             }
         )
+
+    existing_group_ids = [
+        str(current_fields.get("负责人组ID", "")).strip(),
+        str(current_fields.get("员工组ID", "")).strip(),
+        str(current_fields.get("学生组ID", "")).strip(),
+        str(current_fields.get("总体单位ID", "")).strip(),
+    ]
+
+    created_groups: List[Dict[str, Any]] = []
+
+    if all(existing_group_ids):
+        print("group ids already exist, skip create groups")
+        created_groups = [
+            {"name": f"{project_name}-项目负责人", "group_id": existing_group_ids[0]},
+            {"name": f"{project_name}-员工", "group_id": existing_group_ids[1]},
+            {"name": f"{project_name}-学生", "group_id": existing_group_ids[2]},
+            {"name": f"{project_name}-总体单位", "group_id": existing_group_ids[3]},
+        ]
+    else:
+        group_names = [
+            f"{project_name}-项目负责人",
+            f"{project_name}-员工",
+            f"{project_name}-学生",
+            f"{project_name}-总体单位",
+        ]
+
+        try:
+            for group_name in group_names:
+                created = create_user_group(
+                    tenant_access_token=tenant_access_token,
+                    group_name=group_name,
+                    description=f"项目 {project_name} 自动创建的权限用户组"
+                )
+                created_groups.append({
+                    "name": group_name,
+                    "group_id": created["group_id"]
+                })
+                print("created group:", group_name, "=>", created["group_id"])
+        except Exception as e:
+            print("create groups failed:", repr(e))
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "ok": False,
+                    "error": "create_groups_failed",
+                    "detail": str(e),
+                    "created_groups": created_groups
+                }
+            )
 
     fields_to_update = {
         "负责人组ID": created_groups[0]["group_id"],
@@ -516,7 +565,6 @@ async def init_project(
             }
         )
 
-    # 这一步先只做授权预检：验证链接/token都能解析
     try:
         if not main_folder_token:
             raise RuntimeError("总文件夹 token 为空，请检查总文件夹链接或文件夹token字段")
