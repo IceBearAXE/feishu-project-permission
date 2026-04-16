@@ -198,14 +198,26 @@ def build_feishu_admin_login_url() -> str:
     redirect_uri = f"{APP_BASE_URL}/auth/feishu/callback"
     encoded_redirect = urllib.parse.quote(redirect_uri, safe="")
 
-    # 这里只带 offline_access，用来拿 refresh_token
-    scope_str = urllib.parse.quote("offline_access", safe="")
+    # 只放你权限页里已经开通、且确实会用到的“用户身份权限”
+    scopes = [
+        "offline_access",
+        "drive:drive",
+        "drive:file",
+        "docs:doc",
+        "docs:permission.member:create",
+        "sheets:spreadsheet",
+        "wiki:wiki",
+        "bitable:app",
+    ]
+
+    # 关键点：空格分隔，再整体 URL 编码
+    encoded_scope = urllib.parse.quote(" ".join(scopes), safe="")
 
     return (
         "https://open.feishu.cn/open-apis/authen/v1/authorize"
         f"?app_id={FEISHU_APP_ID}"
         f"&redirect_uri={encoded_redirect}"
-        f"&scope={scope_str}"
+        f"&scope={encoded_scope}"
     )
 
 
