@@ -5,6 +5,7 @@ import json
 import re
 import urllib.request
 import urllib.error
+from typing import Any, Dict, List, Optional, Set
 
 app = FastAPI()
 
@@ -20,8 +21,17 @@ async def root():
     return {"ok": True, "message": "service is running"}
 
 
-def parse_loose_feishu_body(raw_text: str) -> dict:
-    result = {}
+def parse_loose_feishu_body(raw_text: str) -> Dict[str, str]:
+    """
+    兼容飞书自动化发来的这种“伪 JSON”：
+    {
+      "record_id": recxxxx,
+      "project_code": AUTO-TEST-013,
+      "project_name": AUTO-TEST-013,
+      "folder_token": TOKEN-AUTO-013
+    }
+    """
+    result: Dict[str, str] = {}
 
     for line in raw_text.splitlines():
         line = line.strip()
@@ -50,8 +60,13 @@ def parse_loose_feishu_body(raw_text: str) -> dict:
     return result
 
 
-def http_json_request(url: str, method: str = "GET", payload: dict | None = None, tenant_access_token: str | None = None) -> dict:
-    headers = {}
+def http_json_request(
+    url: str,
+    method: str = "GET",
+    payload: Optional[Dict[str, Any]] = None,
+    tenant_access_token: Optional[str] = None,
+) -> Dict[str, Any]:
+    headers: Dict[str, str] = {}
 
     if payload is not None:
         data = json.dumps(payload).encode("utf-8")
@@ -100,7 +115,7 @@ def get_feishu_tenant_access_token() -> str:
     return token
 
 
-def create_user_group(tenant_access_token: str, group_name: str, description: str = "") -> dict:
+def create_user_group(tenant_access_token: str, group_name: str, description: str = "") -> Dict[str, Any]:
     url = "https://open.feishu.cn/open-apis/contact/v3/group"
     payload = {
         "name": group_name,
@@ -128,7 +143,7 @@ def create_user_group(tenant_access_token: str, group_name: str, description: st
     }
 
 
-def update_bitable_record(tenant_access_token: str, record_id: str, fields: dict) -> dict:
+def update_bitable_record(tenant_access_token: str, record_id: str, fields: Dict[str, Any]) -> Dict[str, Any]:
     if not BITABLE_APP_TOKEN or not BITABLE_TABLE_ID:
         raise RuntimeError("BITABLE_APP_TOKEN or BITABLE_TABLE_ID is missing")
 
@@ -154,7 +169,7 @@ def update_bitable_record(tenant_access_token: str, record_id: str, fields: dict
     return result
 
 
-def get_bitable_record(tenant_access_token: str, record_id: str) -> dict:
+def get_bitable_record(tenant_access_token: str, record_id: str) -> Dict[str, Any]:
     if not BITABLE_APP_TOKEN or not BITABLE_TABLE_ID:
         raise RuntimeError("BITABLE_APP_TOKEN or BITABLE_TABLE_ID is missing")
 
@@ -173,9 +188,11 @@ def get_bitable_record(tenant_access_token: str, record_id: str) -> dict:
         raise RuntimeError(f"get bitable record failed: {result}")
 
     return result
-def extract_open_ids(field_value):
+
+
+def extract_open_ids(field_value: Any) -> List[str]:
     """
-    人员字段可能是 None，也可能是:
+    人员字段通常是:
     [
       {
         "id": "ou_xxx",
@@ -187,16 +204,21 @@ def extract_open_ids(field_value):
     if not field_value:
         return []
 
-    result = []
+    if not isinstance(field_value, list):
+        return []
+
+    result: List[str] = []
     for item in field_value:
-        member_id = str(item.get("id", "")).strip()
-        if member_id:
-            result.append(member_id)
+        if isinstance(item, dict):
+            member_id = str(item.get("id", "")).strip()
+            if member_id:
+                result.append(member_id)
+
     return result
 
 
-def list_group_member_open_ids(tenant_access_token: str, group_id: str) -> list[str]:
-    member_ids = []
+def list_group_member_open_ids(tenant_access_token: str, group_id: str) -> List[str]:
+    member_ids: List[str] = []
     page_token = ""
 
     while True:
@@ -220,21 +242,22 @@ def list_group_member_open_ids(tenant_access_token: str, group_id: str) -> list[
         items = data.get("items", [])
 
         for item in items:
-            member_id = str(item.get("member_id", "")).strip()
-            if member_id:
-                member_ids.append(member_id)
+            if isinstance(item, dict):
+                member_id = str(item.get("member_id", "")).strip()
+                if member_id:
+                    member_ids.append(member_id)
 
         if not data.get("has_more"):
             break
 
-        page_token = data.get("page_token", "")
+        page_token = str(data.get("page_token", "")).strip()
         if not page_token:
             break
 
     return member_ids
 
 
-def add_group_member(tenant_access_token: str, group_id: str, open_id: str):
+def add_group_member(tenant_access_token: str, group_id: str, open_id: str) -> Dict[str, Any]:
     url = f"https://open.feishu.cn/open-apis/contact/v3/group/{group_id}/member/add"
     payload = {
         "member_id_type": "open_id",
@@ -254,7 +277,7 @@ def add_group_member(tenant_access_token: str, group_id: str, open_id: str):
     return result
 
 
-def remove_group_member(tenant_access_token: str, group_id: str, open_id: str):
+def remove_group_member(tenant_access_token: str, group_id: str, open_id: str) -> Dict[str, Any]:
     url = f"https://open.feishu.cn/open-apis/contact/v3/group/{group_id}/member/remove"
     payload = {
         "member_id_type": "open_id",
@@ -274,11 +297,16 @@ def remove_group_member(tenant_access_token: str, group_id: str, open_id: str):
     return result
 
 
-def sync_one_group(tenant_access_token: str, group_id: str, target_open_ids: list[str], role_name: str):
+def sync_one_group(
+    tenant_access_token: str,
+    group_id: str,
+    target_open_ids: List[str],
+    role_name: str
+) -> None:
     current_open_ids = list_group_member_open_ids(tenant_access_token, group_id)
 
-    target_set = set(target_open_ids)
-    current_set = set(current_open_ids)
+    target_set: Set[str] = set(target_open_ids)
+    current_set: Set[str] = set(current_open_ids)
 
     to_add = sorted(target_set - current_set)
     to_remove = sorted(current_set - target_set)
@@ -365,7 +393,7 @@ async def init_project(
         f"{project_name}-总体单位",
     ]
 
-    created_groups = []
+    created_groups: List[Dict[str, Any]] = []
 
     try:
         for group_name in group_names:
@@ -429,71 +457,6 @@ async def init_project(
             "project_name": project_name,
             "folder_token": folder_token,
             "groups": created_groups
-        }
-    )
-        fields = record_result["data"]["record"]["fields"]
-
-    role_config = [
-        ("项目负责人", "负责人组ID"),
-        ("员工", "员工组ID"),
-        ("学生", "学生组ID"),
-        ("总体单位", "总体单位ID"),
-    ]
-
-    try:
-        for role_field, group_id_field in role_config:
-            group_id = str(fields.get(group_id_field, "")).strip()
-            if not group_id:
-                print(f"[{role_field}] skip, group_id is empty")
-                continue
-
-            target_open_ids = extract_open_ids(fields.get(role_field))
-            sync_one_group(
-                tenant_access_token=tenant_access_token,
-                group_id=group_id,
-                target_open_ids=target_open_ids,
-                role_name=role_field
-            )
-
-        update_bitable_record(
-            tenant_access_token=tenant_access_token,
-            record_id=record_id,
-            fields={
-                "同步状态": "成功",
-                "错误信息": "",
-                "最近同步日期": ""
-            }
-        )
-        print("sync members success")
-    except Exception as e:
-        print("sync members failed:", repr(e))
-        try:
-            update_bitable_record(
-                tenant_access_token=tenant_access_token,
-                record_id=record_id,
-                fields={
-                    "同步状态": "失败",
-                    "错误信息": str(e)
-                }
-            )
-        except Exception as e2:
-            print("write sync error back failed:", repr(e2))
-
-        return JSONResponse(
-            status_code=500,
-            content={
-                "ok": False,
-                "error": "sync_members_failed",
-                "detail": str(e),
-                "record_id": record_id
-            }
-        )
-
-    return JSONResponse(
-        content={
-            "ok": True,
-            "message": "members synced",
-            "record_id": record_id
         }
     )
 
@@ -568,10 +531,67 @@ async def sync_members(
             }
         )
 
+    fields = record_result["data"]["record"]["fields"]
+
+    role_config = [
+        ("项目负责人", "负责人组ID"),
+        ("员工", "员工组ID"),
+        ("学生", "学生组ID"),
+        ("总体单位", "总体单位ID"),
+    ]
+
+    try:
+        for role_field, group_id_field in role_config:
+            group_id = str(fields.get(group_id_field, "")).strip()
+            if not group_id:
+                print(f"[{role_field}] skip, group_id is empty")
+                continue
+
+            target_open_ids = extract_open_ids(fields.get(role_field))
+            sync_one_group(
+                tenant_access_token=tenant_access_token,
+                group_id=group_id,
+                target_open_ids=target_open_ids,
+                role_name=role_field
+            )
+
+        update_bitable_record(
+            tenant_access_token=tenant_access_token,
+            record_id=record_id,
+            fields={
+                "同步状态": "成功",
+                "错误信息": ""
+            }
+        )
+        print("sync members success")
+    except Exception as e:
+        print("sync members failed:", repr(e))
+        try:
+            update_bitable_record(
+                tenant_access_token=tenant_access_token,
+                record_id=record_id,
+                fields={
+                    "同步状态": "失败",
+                    "错误信息": str(e)
+                }
+            )
+        except Exception as e2:
+            print("write sync error back failed:", repr(e2))
+
+        return JSONResponse(
+            status_code=500,
+            content={
+                "ok": False,
+                "error": "sync_members_failed",
+                "detail": str(e),
+                "record_id": record_id
+            }
+        )
+
     return JSONResponse(
         content={
             "ok": True,
-            "message": "record fetched for sync",
+            "message": "members synced",
             "record_id": record_id
         }
     )
