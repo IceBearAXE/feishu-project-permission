@@ -504,6 +504,9 @@ def list_group_member_open_ids(tenant_access_token: str, group_id: str) -> List[
             tenant_access_token=tenant_access_token
         )
 
+        print(f"[list_group_member_open_ids] raw result for group {group_id}:")
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+
         if result.get("code") != 0:
             raise RuntimeError(f"list group members failed: {result}")
 
@@ -511,10 +514,21 @@ def list_group_member_open_ids(tenant_access_token: str, group_id: str) -> List[
         items = data.get("items", [])
 
         for item in items:
-            if isinstance(item, dict):
-                member_id = str(item.get("member_id", "")).strip()
-                if member_id:
-                    member_ids.append(member_id)
+            if not isinstance(item, dict):
+                continue
+
+            # 尽量兼容不同返回字段
+            member_id = (
+                item.get("member_id")
+                or item.get("open_id")
+                or item.get("id")
+                or item.get("user_id")
+                or ""
+            )
+            member_id = str(member_id).strip()
+
+            if member_id:
+                member_ids.append(member_id)
 
         if not data.get("has_more"):
             break
@@ -523,8 +537,16 @@ def list_group_member_open_ids(tenant_access_token: str, group_id: str) -> List[
         if not page_token:
             break
 
-    return member_ids
+    # 去重
+    result_ids: List[str] = []
+    seen = set()
+    for x in member_ids:
+        if x not in seen:
+            seen.add(x)
+            result_ids.append(x)
 
+    print(f"[list_group_member_open_ids] parsed member ids for group {group_id}:", result_ids)
+    return result_ids
 
 def add_group_member(tenant_access_token: str, group_id: str, open_id: str) -> Dict[str, Any]:
     url = f"https://open.feishu.cn/open-apis/contact/v3/group/{group_id}/member/add"
