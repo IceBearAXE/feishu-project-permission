@@ -5,6 +5,7 @@ import json
 import re
 import urllib.request
 import urllib.error
+import urllib.parse
 from typing import Any, Dict, List, Optional, Set
 
 app = FastAPI()
@@ -15,6 +16,15 @@ FEISHU_APP_SECRET = os.getenv("FEISHU_APP_SECRET", "")
 BITABLE_APP_TOKEN = os.getenv("BITABLE_APP_TOKEN", "")
 BITABLE_TABLE_ID = os.getenv("BITABLE_TABLE_ID", "")
 
+# 这里是文档授权用到的常量
+# 如果第一次跑授权时报 member_type 不合法，就把这里改掉再试
+DRIVE_GROUP_MEMBER_TYPE = "group_id"
+
+# 权限值：view / edit / full_access
+PERM_VIEW = "view"
+PERM_EDIT = "edit"
+PERM_FULL_ACCESS = "full_access"
+
 
 @app.get("/")
 async def root():
@@ -22,9 +32,6 @@ async def root():
 
 
 def parse_loose_feishu_body(raw_text: str) -> Dict[str, str]:
-    """
-    兼容飞书自动化发来的“伪 JSON”
-    """
     result: Dict[str, str] = {}
 
     for line in raw_text.splitlines():
@@ -231,9 +238,6 @@ def extract_link_from_hyperlink_field(value: Any) -> str:
 
 
 def extract_drive_token_from_link(link: str) -> str:
-    """
-    从飞书链接里提取 token
-    """
     if not link:
         return ""
 
@@ -400,6 +404,134 @@ def sync_one_group(
         print(f"[{role_name}] removed:", open_id)
 
 
+def get_drive_type_from_token(token: str) -> str:
+    """
+    根据 token 前缀推断云文档类型
+    """
+    if not token:
+        return ""
+
+    if token.startswith("fld"):
+        return "folder"
+    if token.startswith("box"):
+        return "file"
+    if token.startswith("dox"):
+        return "docx"
+    if token.startswith("sht"):
+        return "sheet"
+    if token.startswith("wik"):
+        return "wiki"
+
+    return "folder"
+
+
+def create_drive_permission_member(
+    tenant_access_token: str,
+    token: str,
+    file_type: str,
+    member_id: str,
+    perm: str
+) -> Dict[str, Any]:
+    url = (
+        f"https://open.feishu.cn/open-apis/drive/v1/permissions/{token}/members"
+        f"?type={urllib.parse.quote(file_type)}"
+    )
+    payload = {
+        "member_id": member_id,
+        "member_type": DRIVE_GROUP_MEMBER_TYPE,
+        "perm": perm
+    }
+
+    result = http_json_request(
+        url=url,
+        method="POST",
+        payload=payload,
+        tenant_access_token=tenant_access_token
+    )
+
+    if result.get("code") != 0:
+        raise RuntimeError(f"create drive permission member failed: {result}")
+
+    return result
+
+
+def update_drive_permission_member(
+    tenant_access_token: str,
+    token: str,
+    file_type: str,
+    member_id: str,
+    perm: str
+) -> Dict[str, Any]:
+    url = (
+        f"https://open.feishu.cn/open-apis/drive/v1/permissions/{token}/members/"
+        f"{urllib.parse.quote(member_id)}?type={urllib.parse.quote(file_type)}"
+    )
+    payload = {
+        "member_type": DRIVE_GROUP_MEMBER_TYPE,
+        "perm": perm
+    }
+
+    result = http_json_request(
+        url=url,
+        method="PUT",
+        payload=payload,
+        tenant_access_token=tenant_access_token
+    )
+
+    if result.get("code") != 0:
+        raise RuntimeError(f"update drive permission member failed: {result}")
+
+    return result
+
+
+def upsert_drive_group_permission(
+    tenant_access_token: str,
+    token: str,
+    member_group_id: str,
+    perm: str
+) -> None:
+    file_type = get_drive_type_from_token(token)
+    if not file_type:
+        raise RuntimeError(f"cannot infer file type from token: {token}")
+
+    try:
+        result = create_drive_permission_member(
+            tenant_access_token=tenant_access_token,
+            token=token,
+            file_type=file_type,
+            member_id=member_group_id,
+            perm=perm
+        )
+        print("create permission success:", token, member_group_id, perm)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    except Exception as e:
+        err = str(e)
+        print("create permission failed, try update:", err)
+
+        # 如果已经有权限成员，则改为 update
+        duplicate_signs = [
+            "already",
+            "exists",
+            "duplicate",
+            "重复",
+            "已存在"
+        ]
+        if any(s in err.lower() for s in ["already", "exists", "duplicate"]) or any(s in err for s in ["重复", "已存在"]):
+            result = update_drive_permission_member(
+                tenant_access_token=tenant_access_token,
+                token=token,
+                file_type=file_type,
+                member_id=member_group_id,
+                perm=perm
+            )
+            print("update permission success:", token, member_group_id, perm)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return
+
+        raise
+
+
 @app.post("/init_project")
 async def init_project(
     request: Request,
@@ -540,7 +672,7 @@ async def init_project(
         "学生组ID": created_groups[2]["group_id"],
         "总体单位ID": created_groups[3]["group_id"],
         "初始化状态": "成功",
-        "授权状态": "待处理",
+        "授权状态": "处理中",
         "授权错误信息": ""
     }
 
@@ -569,25 +701,63 @@ async def init_project(
         if not main_folder_token:
             raise RuntimeError("总文件夹 token 为空，请检查总文件夹链接或文件夹token字段")
 
-        print("authorization precheck passed")
-        print("leader group id =", created_groups[0]["group_id"])
-        print("staff group id  =", created_groups[1]["group_id"])
-        print("student group id =", created_groups[2]["group_id"])
-        print("external group id =", created_groups[3]["group_id"])
+        leader_group_id = created_groups[0]["group_id"]
+        staff_group_id = created_groups[1]["group_id"]
+        student_group_id = created_groups[2]["group_id"]
+        external_group_id = created_groups[3]["group_id"]
+
+        print("start real authorization")
+        print("leader group id =", leader_group_id)
+        print("staff group id  =", staff_group_id)
+        print("student group id =", student_group_id)
+        print("external group id =", external_group_id)
         print("main folder token =", main_folder_token)
         print("student tokens =", student_tokens)
         print("external tokens =", external_tokens)
+
+        # 总文件夹
+        upsert_drive_group_permission(
+            tenant_access_token=tenant_access_token,
+            token=main_folder_token,
+            member_group_id=leader_group_id,
+            perm=PERM_FULL_ACCESS
+        )
+        upsert_drive_group_permission(
+            tenant_access_token=tenant_access_token,
+            token=main_folder_token,
+            member_group_id=staff_group_id,
+            perm=PERM_EDIT
+        )
+
+        # 学生链接列表
+        for token in student_tokens:
+            upsert_drive_group_permission(
+                tenant_access_token=tenant_access_token,
+                token=token,
+                member_group_id=student_group_id,
+                perm=PERM_EDIT
+            )
+
+        # 总体单位链接列表
+        for token in external_tokens:
+            upsert_drive_group_permission(
+                tenant_access_token=tenant_access_token,
+                token=token,
+                member_group_id=external_group_id,
+                perm=PERM_VIEW
+            )
 
         update_bitable_record(
             tenant_access_token=tenant_access_token,
             record_id=record_id,
             fields={
-                "授权状态": "待实现",
+                "授权状态": "成功",
                 "授权错误信息": ""
             }
         )
+        print("authorization success")
     except Exception as e:
-        print("authorization precheck failed:", repr(e))
+        print("authorization failed:", repr(e))
         try:
             update_bitable_record(
                 tenant_access_token=tenant_access_token,
@@ -600,10 +770,20 @@ async def init_project(
         except Exception as e2:
             print("write auth error back failed:", repr(e2))
 
+        return JSONResponse(
+            status_code=500,
+            content={
+                "ok": False,
+                "error": "authorization_failed",
+                "detail": str(e),
+                "record_id": record_id
+            }
+        )
+
     return JSONResponse(
         content={
             "ok": True,
-            "message": "groups created and authorization precheck passed",
+            "message": "groups ready and authorization completed",
             "record_id": record_id,
             "project_name": project_name,
             "main_folder_token": main_folder_token,
