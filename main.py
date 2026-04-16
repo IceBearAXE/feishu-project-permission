@@ -22,15 +22,6 @@ async def root():
 
 
 def parse_loose_feishu_body(raw_text: str) -> Dict[str, str]:
-    """
-    兼容飞书自动化发来的这种“伪 JSON”：
-    {
-      "record_id": recxxxx,
-      "project_code": AUTO-TEST-013,
-      "project_name": AUTO-TEST-013,
-      "folder_token": TOKEN-AUTO-013
-    }
-    """
     result: Dict[str, str] = {}
 
     for line in raw_text.splitlines():
@@ -152,9 +143,7 @@ def update_bitable_record(tenant_access_token: str, record_id: str, fields: Dict
         f"/tables/{BITABLE_TABLE_ID}/records/{record_id}"
     )
 
-    payload = {
-        "fields": fields
-    }
+    payload = {"fields": fields}
 
     result = http_json_request(
         url=url,
@@ -169,38 +158,107 @@ def update_bitable_record(tenant_access_token: str, record_id: str, fields: Dict
     return result
 
 
-def get_bitable_record(tenant_access_token: str, record_id: str) -> Dict[str, Any]:
-    if not BITABLE_APP_TOKEN or not BITABLE_TABLE_ID:
-        raise RuntimeError("BITABLE_APP_TOKEN or BITABLE_TABLE_ID is missing")
+def normalize_text_to_list(value: Any) -> List[str]:
+    """
+    支持：
+    1. 多行文本，一行一个链接
+    2. 分号分隔
+    3. 逗号分隔
+    """
+    if value is None:
+        return []
 
-    url = (
-        f"https://open.feishu.cn/open-apis/bitable/v1/apps/{BITABLE_APP_TOKEN}"
-        f"/tables/{BITABLE_TABLE_ID}/records/{record_id}"
-    )
+    if isinstance(value, dict):
+        maybe_link = str(value.get("link", "")).strip()
+        return [maybe_link] if maybe_link else []
 
-    result = http_json_request(
-        url=url,
-        method="GET",
-        tenant_access_token=tenant_access_token
-    )
+    text = str(value).strip()
+    if not text:
+        return []
 
-    if result.get("code") != 0:
-        raise RuntimeError(f"get bitable record failed: {result}")
+    text = text.replace("；", ";").replace("，", ",")
+    parts: List[str] = []
+
+    for block in text.splitlines():
+        block = block.strip()
+        if not block:
+            continue
+
+        tmp = re.split(r"[;,]", block)
+        for item in tmp:
+            item = item.strip()
+            if item:
+                parts.append(item)
+
+    return parts
+
+
+def extract_link_from_hyperlink_field(value: Any) -> str:
+    """
+    超链接字段通常会读成：
+    {"link": "...", "text": "..."}
+    """
+    if value is None:
+        return ""
+
+    if isinstance(value, dict):
+        return str(value.get("link", "")).strip()
+
+    return str(value).strip()
+
+
+def extract_drive_token_from_link(link: str) -> str:
+    """
+    从飞书链接里提取 token。
+    兼容常见形态：
+    /folder/fldxxxx
+    /file/boxcnxxxx
+    /docx/doxcnxxxx
+    /sheet/shtcnxxxx
+    /wiki/wikcnxxxx
+    以及 query 里带 token 的情况
+    """
+    if not link:
+        return ""
+
+    patterns = [
+        r"/folder/([A-Za-z0-9]+)",
+        r"/file/([A-Za-z0-9]+)",
+        r"/docx/([A-Za-z0-9]+)",
+        r"/sheet/([A-Za-z0-9]+)",
+        r"/wiki/([A-Za-z0-9]+)",
+        r"[?&]token=([A-Za-z0-9]+)",
+    ]
+
+    for p in patterns:
+        m = re.search(p, link)
+        if m:
+            return m.group(1)
+
+    return ""
+
+
+def extract_tokens_from_links_field(value: Any) -> List[str]:
+    links = normalize_text_to_list(value)
+    tokens: List[str] = []
+
+    for link in links:
+        token = extract_drive_token_from_link(link)
+        if token:
+            tokens.append(token)
+
+    # 去重但保序
+    seen: Set[str] = set()
+    result: List[str] = []
+    for t in tokens:
+        if t not in seen:
+            seen.add(t)
+            result.append(t)
 
     return result
 
 
 def extract_open_ids(field_value: Any) -> List[str]:
-    """
-    人员字段通常是:
-    [
-      {
-        "id": "ou_xxx",
-        "name": "张三",
-        ...
-      }
-    ]
-    """
     if not field_value:
         return []
 
@@ -213,7 +271,6 @@ def extract_open_ids(field_value: Any) -> List[str]:
             member_id = str(item.get("id", "")).strip()
             if member_id:
                 result.append(member_id)
-
     return result
 
 
@@ -357,21 +414,32 @@ async def init_project(
     print(json.dumps(body, ensure_ascii=False, indent=2))
 
     record_id = str(body.get("record_id", "")).strip()
-    project_code = str(body.get("project_code", "")).strip()
     project_name = str(body.get("project_name", "")).strip()
+
+    # 过渡期：保留 folder_token，同时支持从总文件夹链接提取
     folder_token = str(body.get("folder_token", "")).strip()
+    folder_link = str(body.get("folder_link", "")).strip()
+    student_links = body.get("student_links", "")
+    external_links = body.get("external_links", "")
+
+    extracted_main_token = extract_drive_token_from_link(folder_link) if folder_link else ""
+    main_folder_token = extracted_main_token or folder_token
+
+    student_tokens = extract_tokens_from_links_field(student_links)
+    external_tokens = extract_tokens_from_links_field(external_links)
+
+    print("project_name =", project_name)
+    print("folder_token(from body) =", folder_token)
+    print("folder_link =", folder_link)
+    print("main_folder_token =", main_folder_token)
+    print("student_tokens =", student_tokens)
+    print("external_tokens =", external_tokens)
 
     if not record_id:
-        return JSONResponse(
-            status_code=400,
-            content={"ok": False, "error": "record_id is empty"}
-        )
+        return JSONResponse(status_code=400, content={"ok": False, "error": "record_id is empty"})
 
     if not project_name:
-        return JSONResponse(
-            status_code=400,
-            content={"ok": False, "error": "project_name is empty"}
-        )
+        return JSONResponse(status_code=400, content={"ok": False, "error": "project_name is empty"})
 
     try:
         tenant_access_token = get_feishu_tenant_access_token()
@@ -381,11 +449,7 @@ async def init_project(
         print("get tenant_access_token failed:", repr(e))
         return JSONResponse(
             status_code=500,
-            content={
-                "ok": False,
-                "error": "get_tenant_access_token_failed",
-                "detail": str(e)
-            }
+            content={"ok": False, "error": "get_tenant_access_token_failed", "detail": str(e)}
         )
 
     group_names = [
@@ -426,7 +490,9 @@ async def init_project(
         "员工组ID": created_groups[1]["group_id"],
         "学生组ID": created_groups[2]["group_id"],
         "总体单位ID": created_groups[3]["group_id"],
-        "初始化状态": "成功"
+        "初始化状态": "成功",
+        "授权状态": "待处理",
+        "授权错误信息": ""
     }
 
     try:
@@ -450,14 +516,51 @@ async def init_project(
             }
         )
 
+    # 这一步先只做授权预检：验证链接/token都能解析
+    try:
+        if not main_folder_token:
+            raise RuntimeError("总文件夹 token 为空，请检查总文件夹链接或文件夹token字段")
+
+        print("authorization precheck passed")
+        print("leader group id =", created_groups[0]["group_id"])
+        print("staff group id  =", created_groups[1]["group_id"])
+        print("student group id =", created_groups[2]["group_id"])
+        print("external group id =", created_groups[3]["group_id"])
+        print("main folder token =", main_folder_token)
+        print("student tokens =", student_tokens)
+        print("external tokens =", external_tokens)
+
+        update_bitable_record(
+            tenant_access_token=tenant_access_token,
+            record_id=record_id,
+            fields={
+                "授权状态": "待实现",
+                "授权错误信息": ""
+            }
+        )
+    except Exception as e:
+        print("authorization precheck failed:", repr(e))
+        try:
+            update_bitable_record(
+                tenant_access_token=tenant_access_token,
+                record_id=record_id,
+                fields={
+                    "授权状态": "失败",
+                    "授权错误信息": str(e)
+                }
+            )
+        except Exception as e2:
+            print("write auth error back failed:", repr(e2))
+
     return JSONResponse(
         content={
             "ok": True,
-            "message": "groups created and record updated",
+            "message": "groups created and authorization precheck passed",
             "record_id": record_id,
-            "project_code": project_code,
             "project_name": project_name,
-            "folder_token": folder_token,
+            "main_folder_token": main_folder_token,
+            "student_tokens": student_tokens,
+            "external_tokens": external_tokens,
             "groups": created_groups
         }
     )
@@ -494,10 +597,7 @@ async def sync_members(
 
     record_id = str(body.get("record_id", "")).strip()
     if not record_id:
-        return JSONResponse(
-            status_code=400,
-            content={"ok": False, "error": "record_id is empty"}
-        )
+        return JSONResponse(status_code=400, content={"ok": False, "error": "record_id is empty"})
 
     try:
         tenant_access_token = get_feishu_tenant_access_token()
@@ -507,11 +607,7 @@ async def sync_members(
         print("get tenant_access_token failed:", repr(e))
         return JSONResponse(
             status_code=500,
-            content={
-                "ok": False,
-                "error": "get_tenant_access_token_failed",
-                "detail": str(e)
-            }
+            content={"ok": False, "error": "get_tenant_access_token_failed", "detail": str(e)}
         )
 
     try:
@@ -525,12 +621,7 @@ async def sync_members(
         print("get bitable record failed:", repr(e))
         return JSONResponse(
             status_code=500,
-            content={
-                "ok": False,
-                "error": "get_bitable_record_failed",
-                "detail": str(e),
-                "record_id": record_id
-            }
+            content={"ok": False, "error": "get_bitable_record_failed", "detail": str(e), "record_id": record_id}
         )
 
     fields = record_result["data"]["record"]["fields"]
@@ -562,7 +653,7 @@ async def sync_members(
             record_id=record_id,
             fields={
                 "同步状态": "成功",
-                "错误信息": ""
+                "同步错误信息": ""
             }
         )
         print("sync members success")
@@ -574,7 +665,7 @@ async def sync_members(
                 record_id=record_id,
                 fields={
                     "同步状态": "失败",
-                    "错误信息": str(e)
+                    "同步错误信息": str(e)
                 }
             )
         except Exception as e2:
@@ -582,18 +673,9 @@ async def sync_members(
 
         return JSONResponse(
             status_code=500,
-            content={
-                "ok": False,
-                "error": "sync_members_failed",
-                "detail": str(e),
-                "record_id": record_id
-            }
+            content={"ok": False, "error": "sync_members_failed", "detail": str(e), "record_id": record_id}
         )
 
     return JSONResponse(
-        content={
-            "ok": True,
-            "message": "members synced",
-            "record_id": record_id
-        }
+        content={"ok": True, "message": "members synced", "record_id": record_id}
     )
