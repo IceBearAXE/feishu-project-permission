@@ -160,6 +160,27 @@ def get_feishu_tenant_access_token() -> str:
 
     return token
 
+def get_feishu_app_access_token() -> str:
+    if not FEISHU_APP_ID or not FEISHU_APP_SECRET:
+        raise RuntimeError("FEISHU_APP_ID or FEISHU_APP_SECRET is missing")
+
+    url = "https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal"
+    payload = {
+        "app_id": FEISHU_APP_ID,
+        "app_secret": FEISHU_APP_SECRET
+    }
+
+    result = http_json_request(url=url, method="POST", payload=payload)
+
+    if result.get("code") != 0:
+        raise RuntimeError(f"get app_access_token failed: {result}")
+
+    token = result.get("app_access_token")
+    if not token:
+        raise RuntimeError(f"app_access_token missing: {result}")
+
+    return token
+
 def build_feishu_admin_login_url() -> str:
     if not FEISHU_APP_ID:
         raise RuntimeError("FEISHU_APP_ID is missing")
@@ -211,10 +232,13 @@ def exchange_code_for_user_tokens(code: str) -> Dict[str, str]:
     if not code:
         raise RuntimeError("code is empty")
 
+    app_access_token = get_feishu_app_access_token()
+
     url = "https://open.feishu.cn/open-apis/authen/v1/oidc/access_token"
     payload = {
         "grant_type": "authorization_code",
-        "code": code
+        "code": code,
+        "app_access_token": app_access_token
     }
 
     result = http_json_request(url=url, method="POST", payload=payload)
@@ -233,10 +257,13 @@ def refresh_user_access_token(refresh_token: str) -> Dict[str, str]:
     if not refresh_token:
         raise RuntimeError("refresh_token is empty")
 
+    app_access_token = get_feishu_app_access_token()
+
     url = "https://open.feishu.cn/open-apis/authen/v1/oidc/refresh_access_token"
     payload = {
         "grant_type": "refresh_token",
-        "refresh_token": refresh_token
+        "refresh_token": refresh_token,
+        "app_access_token": app_access_token
     }
 
     result = http_json_request(url=url, method="POST", payload=payload)
@@ -248,7 +275,6 @@ def refresh_user_access_token(refresh_token: str) -> Dict[str, str]:
     if not tokens["access_token"]:
         raise RuntimeError(f"refreshed access token missing: {result}")
 
-    # 刷新后 refresh_token 可能也会轮换
     return tokens
 
 
