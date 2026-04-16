@@ -18,7 +18,7 @@ BITABLE_TABLE_ID = os.getenv("BITABLE_TABLE_ID", "")
 
 # 这里是文档授权用到的常量
 # 如果第一次跑授权时报 member_type 不合法，就把这里改掉再试
-DRIVE_GROUP_MEMBER_TYPE = "group_id"
+DRIVE_GROUP_MEMBER_TYPE = ""groupid""
 
 # 权限值：view / edit / full_access
 PERM_VIEW = "view"
