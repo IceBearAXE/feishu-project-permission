@@ -194,17 +194,8 @@ def build_feishu_admin_login_url() -> str:
     redirect_uri = f"{APP_BASE_URL}/auth/feishu/callback"
     encoded_redirect = urllib.parse.quote(redirect_uri, safe="")
 
-    scopes = [
-        "offline_access",
-        "drive:drive",
-        "drive:file",
-        "docs:doc",
-        "docs:permission.member:create",
-        "sheets:spreadsheet",
-        "wiki:wiki",
-        "bitable:app",
-    ]
-    scope_str = urllib.parse.quote(" ".join(scopes), safe="")
+    # 这里只保留 offline_access
+    scope_str = urllib.parse.quote("offline_access", safe="")
 
     return (
         "https://open.feishu.cn/open-apis/authen/v1/authorize"
