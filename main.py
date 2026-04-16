@@ -1,9 +1,9 @@
-import time
 from fastapi import FastAPI, Request, Header, HTTPException
 from fastapi.responses import JSONResponse
 import os
 import json
 import re
+import time
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -18,23 +18,24 @@ BITABLE_APP_TOKEN = os.getenv("BITABLE_APP_TOKEN", "")
 BITABLE_TABLE_ID = os.getenv("BITABLE_TABLE_ID", "")
 APP_BASE_URL = os.getenv("APP_BASE_URL", "").rstrip("/")
 ADMIN_REFRESH_TOKEN = os.getenv("ADMIN_REFRESH_TOKEN", "")
-ADMIN_ACCESS_TOKEN_CACHE = ""
-ADMIN_ACCESS_TOKEN_EXPIRES_AT = 0
-ADMIN_REFRESH_TOKEN_CACHE = ADMIN_REFRESH_TOKEN
 
-# 这里是文档授权用到的常量
-# 如果第一次跑授权时报 member_type 不合法，就把这里改掉再试
+# 文档权限接口里，用户组的 member_type 用 groupid
 DRIVE_GROUP_MEMBER_TYPE = "groupid"
 
-# 权限值：view / edit / full_access
 PERM_VIEW = "view"
 PERM_EDIT = "edit"
 PERM_FULL_ACCESS = "full_access"
+
+# 管理员 token 运行时缓存
+ADMIN_ACCESS_TOKEN_CACHE = ""
+ADMIN_ACCESS_TOKEN_EXPIRES_AT = 0
+ADMIN_REFRESH_TOKEN_CACHE = ADMIN_REFRESH_TOKEN
 
 
 @app.get("/")
 async def root():
     return {"ok": True, "message": "service is running"}
+
 
 @app.get("/auth/feishu/login")
 async def feishu_login():
@@ -64,13 +65,14 @@ async def feishu_callback(code: str = "", state: str = ""):
         tokens = exchange_code_for_user_tokens(code)
         print("admin oauth callback success")
         print("admin access token prefix =", tokens["access_token"][:20] + "...")
-        print("admin refresh token prefix =", tokens["refresh_token"][:20] + "..." if tokens["refresh_token"] else "")
+        if tokens.get("refresh_token"):
+            print("admin refresh token prefix =", tokens["refresh_token"][:20] + "...")
 
         return JSONResponse({
             "ok": True,
             "message": "请把 refresh_token 复制到 Render 环境变量 ADMIN_REFRESH_TOKEN，然后重新部署",
             "access_token_prefix": tokens["access_token"][:20] + "...",
-            "refresh_token": tokens["refresh_token"]
+            "refresh_token": tokens.get("refresh_token", "")
         })
     except Exception as e:
         print("admin oauth callback failed:", repr(e))
@@ -164,6 +166,7 @@ def get_feishu_tenant_access_token() -> str:
 
     return token
 
+
 def get_feishu_app_access_token() -> str:
     if not FEISHU_APP_ID or not FEISHU_APP_SECRET:
         raise RuntimeError("FEISHU_APP_ID or FEISHU_APP_SECRET is missing")
@@ -185,6 +188,7 @@ def get_feishu_app_access_token() -> str:
 
     return token
 
+
 def build_feishu_admin_login_url() -> str:
     if not FEISHU_APP_ID:
         raise RuntimeError("FEISHU_APP_ID is missing")
@@ -194,10 +198,14 @@ def build_feishu_admin_login_url() -> str:
     redirect_uri = f"{APP_BASE_URL}/auth/feishu/callback"
     encoded_redirect = urllib.parse.quote(redirect_uri, safe="")
 
+    # 这里只带 offline_access，用来拿 refresh_token
+    scope_str = urllib.parse.quote("offline_access", safe="")
+
     return (
         "https://open.feishu.cn/open-apis/authen/v1/authorize"
         f"?app_id={FEISHU_APP_ID}"
         f"&redirect_uri={encoded_redirect}"
+        f"&scope={scope_str}"
     )
 
 
@@ -229,7 +237,7 @@ def _extract_oauth_tokens(result: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def exchange_code_for_user_tokens(code: str) -> Dict[str, str]:
+def exchange_code_for_user_tokens(code: str) -> Dict[str, Any]:
     if not code:
         raise RuntimeError("code is empty")
 
@@ -254,7 +262,7 @@ def exchange_code_for_user_tokens(code: str) -> Dict[str, str]:
     return tokens
 
 
-def refresh_user_access_token(refresh_token: str) -> Dict[str, str]:
+def refresh_user_access_token(refresh_token: str) -> Dict[str, Any]:
     if not refresh_token:
         raise RuntimeError("refresh_token is empty")
 
@@ -286,7 +294,7 @@ def get_admin_user_access_token() -> str:
 
     now = time.time()
 
-    # access_token 还没过期，就直接用，不要反复刷新
+    # access_token 没过期就直接复用
     if ADMIN_ACCESS_TOKEN_CACHE and now < ADMIN_ACCESS_TOKEN_EXPIRES_AT - 300:
         return ADMIN_ACCESS_TOKEN_CACHE
 
@@ -298,7 +306,7 @@ def get_admin_user_access_token() -> str:
     ADMIN_ACCESS_TOKEN_CACHE = tokens["access_token"]
     ADMIN_ACCESS_TOKEN_EXPIRES_AT = now + int(tokens.get("expires_in", 7200))
 
-    # 关键：刷新后 refresh_token 会轮换，要更新内存里的值
+    # 刷新后 refresh_token 会轮换，这里只更新内存
     if tokens.get("refresh_token"):
         ADMIN_REFRESH_TOKEN_CACHE = tokens["refresh_token"]
         print("admin refresh_token rotated in memory")
@@ -380,13 +388,6 @@ def get_bitable_record(tenant_access_token: str, record_id: str) -> Dict[str, An
 
 
 def normalize_text_to_list(value: Any) -> List[str]:
-    """
-    支持：
-    1. 多行文本，一行一个链接
-    2. 字面量 \\n
-    3. 分号分隔
-    4. 逗号分隔
-    """
     if value is None:
         return []
 
@@ -415,16 +416,6 @@ def normalize_text_to_list(value: Any) -> List[str]:
                 parts.append(item)
 
     return parts
-
-
-def extract_link_from_hyperlink_field(value: Any) -> str:
-    if value is None:
-        return ""
-
-    if isinstance(value, dict):
-        return str(value.get("link", "")).strip()
-
-    return str(value).strip()
 
 
 def extract_drive_token_from_link(link: str) -> str:
@@ -480,7 +471,6 @@ def extract_open_ids(field_value: Any) -> List[str]:
             member_id = str(item.get("id", "")).strip()
             if member_id:
                 result.append(member_id)
-
     return result
 
 
@@ -595,9 +585,6 @@ def sync_one_group(
 
 
 def get_drive_type_from_token(token: str) -> str:
-    """
-    根据 token 前缀推断云文档类型
-    """
     if not token:
         return ""
 
@@ -616,7 +603,7 @@ def get_drive_type_from_token(token: str) -> str:
 
 
 def create_drive_permission_member(
-    tenant_access_token: str,
+    access_token: str,
     token: str,
     file_type: str,
     member_id: str,
@@ -636,7 +623,7 @@ def create_drive_permission_member(
         url=url,
         method="POST",
         payload=payload,
-        tenant_access_token=tenant_access_token
+        tenant_access_token=access_token
     )
 
     if result.get("code") != 0:
@@ -646,7 +633,7 @@ def create_drive_permission_member(
 
 
 def update_drive_permission_member(
-    tenant_access_token: str,
+    access_token: str,
     token: str,
     file_type: str,
     member_id: str,
@@ -665,7 +652,7 @@ def update_drive_permission_member(
         url=url,
         method="PUT",
         payload=payload,
-        tenant_access_token=tenant_access_token
+        tenant_access_token=access_token
     )
 
     if result.get("code") != 0:
@@ -675,7 +662,7 @@ def update_drive_permission_member(
 
 
 def upsert_drive_group_permission(
-    tenant_access_token: str,
+    access_token: str,
     token: str,
     member_group_id: str,
     perm: str
@@ -686,7 +673,7 @@ def upsert_drive_group_permission(
 
     try:
         result = create_drive_permission_member(
-            tenant_access_token=tenant_access_token,
+            access_token=access_token,
             token=token,
             file_type=file_type,
             member_id=member_group_id,
@@ -699,17 +686,9 @@ def upsert_drive_group_permission(
         err = str(e)
         print("create permission failed, try update:", err)
 
-        # 如果已经有权限成员，则改为 update
-        duplicate_signs = [
-            "already",
-            "exists",
-            "duplicate",
-            "重复",
-            "已存在"
-        ]
         if any(s in err.lower() for s in ["already", "exists", "duplicate"]) or any(s in err for s in ["重复", "已存在"]):
             result = update_drive_permission_member(
-                tenant_access_token=tenant_access_token,
+                access_token=access_token,
                 token=token,
                 file_type=file_type,
                 member_id=member_group_id,
@@ -904,36 +883,34 @@ async def init_project(
         print("main folder token =", main_folder_token)
         print("student tokens =", student_tokens)
         print("external tokens =", external_tokens)
+
         drive_access_token = get_admin_user_access_token()
         print("got admin user_access_token for drive authorization")
 
-        # 总文件夹
         upsert_drive_group_permission(
-            tenant_access_token=drive_access_token,
+            access_token=drive_access_token,
             token=main_folder_token,
             member_group_id=leader_group_id,
             perm=PERM_FULL_ACCESS
         )
         upsert_drive_group_permission(
-            tenant_access_token=drive_access_token,
+            access_token=drive_access_token,
             token=main_folder_token,
             member_group_id=staff_group_id,
             perm=PERM_EDIT
         )
 
-        # 学生链接列表
         for token in student_tokens:
             upsert_drive_group_permission(
-                tenant_access_token=drive_access_token,
+                access_token=drive_access_token,
                 token=token,
                 member_group_id=student_group_id,
                 perm=PERM_EDIT
             )
 
-        # 总体单位链接列表
         for token in external_tokens:
             upsert_drive_group_permission(
-                tenant_access_token=drive_access_token,
+                access_token=drive_access_token,
                 token=token,
                 member_group_id=external_group_id,
                 perm=PERM_VIEW
