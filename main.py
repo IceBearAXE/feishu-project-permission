@@ -511,22 +511,17 @@ def list_group_member_open_ids(tenant_access_token: str, group_id: str) -> List[
             raise RuntimeError(f"list group members failed: {result}")
 
         data = result.get("data", {})
-        items = data.get("items", [])
+
+        # 关键：飞书这里返回的是 memberlist，不是 items
+        items = data.get("memberlist", [])
+        if not isinstance(items, list):
+            items = []
 
         for item in items:
             if not isinstance(item, dict):
                 continue
 
-            # 尽量兼容不同返回字段
-            member_id = (
-                item.get("member_id")
-                or item.get("open_id")
-                or item.get("id")
-                or item.get("user_id")
-                or ""
-            )
-            member_id = str(member_id).strip()
-
+            member_id = str(item.get("member_id", "")).strip()
             if member_id:
                 member_ids.append(member_id)
 
@@ -545,7 +540,7 @@ def list_group_member_open_ids(tenant_access_token: str, group_id: str) -> List[
             seen.add(x)
             result_ids.append(x)
 
-    print(f"[list_group_member_open_ids] parsed member ids for group {group_id}:", result_ids)
+    print(f"[list_group_member_open_ids] parsed member ids for group {group_id}: {result_ids}")
     return result_ids
 
 def add_group_member(tenant_access_token: str, group_id: str, open_id: str) -> Dict[str, Any]:
@@ -565,21 +560,23 @@ def add_group_member(tenant_access_token: str, group_id: str, open_id: str) -> D
         )
     except Exception as e:
         err = str(e)
-        # 42005: member exist in group
         if "42005" in err or "member exist in group" in err:
             print("add group member skipped, member already exists:", open_id, "in", group_id)
             return {
                 "code": 42005,
-                "msg": "member exist in group"
+                "msg": "member exist in group",
+                "skipped": True
             }
         raise
 
     if result.get("code") != 0:
         if result.get("code") == 42005:
             print("add group member skipped, member already exists:", open_id, "in", group_id)
+            result["skipped"] = True
             return result
         raise RuntimeError(f"add group member failed: {result}")
 
+    result["skipped"] = False
     return result
 
 
@@ -624,8 +621,11 @@ def sync_one_group(
     print(f"[{role_name}] to_remove =", to_remove)
 
     for open_id in to_add:
-        add_group_member(tenant_access_token, group_id, open_id)
-        print(f"[{role_name}] added:", open_id)
+        add_result = add_group_member(tenant_access_token, group_id, open_id)
+        if add_result.get("skipped"):
+            print(f"[{role_name}] skipped add:", open_id)
+        else:
+            print(f"[{role_name}] added:", open_id)
 
     for open_id in to_remove:
         remove_group_member(tenant_access_token, group_id, open_id)
