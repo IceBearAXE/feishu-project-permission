@@ -18,6 +18,7 @@ BITABLE_APP_TOKEN = os.getenv("BITABLE_APP_TOKEN", "")
 BITABLE_TABLE_ID = os.getenv("BITABLE_TABLE_ID", "")
 APP_BASE_URL = os.getenv("APP_BASE_URL", "").rstrip("/")
 ADMIN_REFRESH_TOKEN = os.getenv("ADMIN_REFRESH_TOKEN", "")
+CONFIG_TABLE_ID = os.getenv("CONFIG_TABLE_ID", "")
 
 # 文档权限接口里，用户组的 member_type 用 groupid
 DRIVE_GROUP_MEMBER_TYPE = "groupid"
@@ -55,6 +56,10 @@ async def feishu_login():
 
 @app.get("/auth/feishu/callback")
 async def feishu_callback(code: str = "", state: str = ""):
+    global ADMIN_REFRESH_TOKEN_CACHE
+    global ADMIN_ACCESS_TOKEN_CACHE
+    global ADMIN_ACCESS_TOKEN_EXPIRES_AT
+
     if not code:
         return JSONResponse(
             status_code=400,
@@ -68,11 +73,19 @@ async def feishu_callback(code: str = "", state: str = ""):
         if tokens.get("refresh_token"):
             print("admin refresh token prefix =", tokens["refresh_token"][:20] + "...")
 
+        ADMIN_ACCESS_TOKEN_CACHE = tokens["access_token"]
+        ADMIN_ACCESS_TOKEN_EXPIRES_AT = time.time() + int(tokens.get("expires_in", 7200))
+
+        if tokens.get("refresh_token"):
+            ADMIN_REFRESH_TOKEN_CACHE = tokens["refresh_token"]
+
+            tenant_access_token = get_feishu_tenant_access_token()
+            save_persisted_admin_refresh_token(tenant_access_token, tokens["refresh_token"])
+
         return JSONResponse({
             "ok": True,
-            "message": "请把 refresh_token 复制到 Render 环境变量 ADMIN_REFRESH_TOKEN，然后重新部署",
-            "access_token_prefix": tokens["access_token"][:20] + "...",
-            "refresh_token": tokens.get("refresh_token", "")
+            "message": "管理员 refresh_token 已写入系统配置表",
+            "access_token_prefix": tokens["access_token"][:20] + "..."
         })
     except Exception as e:
         print("admin oauth callback failed:", repr(e))
@@ -306,22 +319,33 @@ def get_admin_user_access_token() -> str:
 
     now = time.time()
 
-    # access_token 没过期就直接复用
+    # access_token 还没过期，直接复用
     if ADMIN_ACCESS_TOKEN_CACHE and now < ADMIN_ACCESS_TOKEN_EXPIRES_AT - 300:
         return ADMIN_ACCESS_TOKEN_CACHE
 
-    if not ADMIN_REFRESH_TOKEN_CACHE:
+    tenant_access_token = get_feishu_tenant_access_token()
+
+    # 优先级：内存 > 配置表 > 环境变量
+    refresh_token = ADMIN_REFRESH_TOKEN_CACHE.strip()
+
+    if not refresh_token:
+        refresh_token = get_persisted_admin_refresh_token(tenant_access_token)
+
+    if not refresh_token:
+        refresh_token = ADMIN_REFRESH_TOKEN.strip()
+
+    if not refresh_token:
         raise RuntimeError("ADMIN_REFRESH_TOKEN is missing")
 
-    tokens = refresh_user_access_token(ADMIN_REFRESH_TOKEN_CACHE)
+    tokens = refresh_user_access_token(refresh_token)
 
     ADMIN_ACCESS_TOKEN_CACHE = tokens["access_token"]
     ADMIN_ACCESS_TOKEN_EXPIRES_AT = now + int(tokens.get("expires_in", 7200))
 
-    # 刷新后 refresh_token 会轮换，这里只更新内存
     if tokens.get("refresh_token"):
         ADMIN_REFRESH_TOKEN_CACHE = tokens["refresh_token"]
-        print("admin refresh_token rotated in memory")
+        save_persisted_admin_refresh_token(tenant_access_token, tokens["refresh_token"])
+        print("admin refresh_token rotated and persisted")
 
     return ADMIN_ACCESS_TOKEN_CACHE
 
@@ -397,6 +421,106 @@ def get_bitable_record(tenant_access_token: str, record_id: str) -> Dict[str, An
         raise RuntimeError(f"get bitable record failed: {result}")
 
     return result
+
+def list_bitable_records(tenant_access_token: str, table_id: str, page_size: int = 100) -> Dict[str, Any]:
+    if not BITABLE_APP_TOKEN or not table_id:
+        raise RuntimeError("BITABLE_APP_TOKEN or table_id is missing")
+
+    url = (
+        f"https://open.feishu.cn/open-apis/bitable/v1/apps/{BITABLE_APP_TOKEN}"
+        f"/tables/{table_id}/records?page_size={page_size}"
+    )
+
+    result = http_json_request(
+        url=url,
+        method="GET",
+        tenant_access_token=tenant_access_token
+    )
+
+    if result.get("code") != 0:
+        raise RuntimeError(f"list bitable records failed: {result}")
+
+    return result
+
+
+def update_bitable_record_by_table(
+    tenant_access_token: str,
+    table_id: str,
+    record_id: str,
+    fields: Dict[str, Any]
+) -> Dict[str, Any]:
+    if not BITABLE_APP_TOKEN or not table_id:
+        raise RuntimeError("BITABLE_APP_TOKEN or table_id is missing")
+
+    url = (
+        f"https://open.feishu.cn/open-apis/bitable/v1/apps/{BITABLE_APP_TOKEN}"
+        f"/tables/{table_id}/records/{record_id}"
+    )
+
+    payload = {"fields": fields}
+
+    result = http_json_request(
+        url=url,
+        method="PUT",
+        payload=payload,
+        tenant_access_token=tenant_access_token
+    )
+
+    if result.get("code") != 0:
+        raise RuntimeError(f"update bitable record by table failed: {result}")
+
+    return result
+
+def get_persisted_admin_refresh_token(tenant_access_token: str) -> str:
+    if not CONFIG_TABLE_ID:
+        return ""
+
+    result = list_bitable_records(
+        tenant_access_token=tenant_access_token,
+        table_id=CONFIG_TABLE_ID,
+        page_size=100
+    )
+
+    items = result.get("data", {}).get("items", [])
+    for item in items:
+        fields = item.get("fields", {})
+        key = str(fields.get("配置项", "")).strip()
+        if key == "ADMIN_REFRESH_TOKEN":
+            return str(fields.get("配置值", "")).strip()
+
+    return ""
+
+
+def save_persisted_admin_refresh_token(tenant_access_token: str, refresh_token: str) -> None:
+    if not CONFIG_TABLE_ID:
+        print("CONFIG_TABLE_ID is empty, skip persist refresh token")
+        return
+
+    result = list_bitable_records(
+        tenant_access_token=tenant_access_token,
+        table_id=CONFIG_TABLE_ID,
+        page_size=100
+    )
+
+    items = result.get("data", {}).get("items", [])
+    for item in items:
+        fields = item.get("fields", {})
+        key = str(fields.get("配置项", "")).strip()
+        if key == "ADMIN_REFRESH_TOKEN":
+            record_id = item.get("record_id") or item.get("id")
+            if not record_id:
+                raise RuntimeError("config record_id is missing")
+
+            update_bitable_record_by_table(
+                tenant_access_token=tenant_access_token,
+                table_id=CONFIG_TABLE_ID,
+                record_id=record_id,
+                fields={"配置值": refresh_token}
+            )
+            print("persisted admin refresh token to config table")
+            return
+
+    raise RuntimeError("ADMIN_REFRESH_TOKEN row not found in config table")
 
 
 def normalize_text_to_list(value: Any) -> List[str]:
