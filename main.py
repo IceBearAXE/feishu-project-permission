@@ -542,6 +542,9 @@ def add_group_member(tenant_access_token: str, group_id: str, open_id: str) -> D
     )
 
     if result.get("code") != 0:
+        if result.get("code") == 42005:
+            print("add group member skipped, member already exists:", open_id, "in", group_id)
+            return result
         raise RuntimeError(f"add group member failed: {result}")
 
     return result
