@@ -260,6 +260,7 @@ def list_group_member_open_ids(tenant_access_token: str, group_id: str) -> List[
 def add_group_member(tenant_access_token: str, group_id: str, open_id: str) -> Dict[str, Any]:
     url = f"https://open.feishu.cn/open-apis/contact/v3/group/{group_id}/member/add"
     payload = {
+        "member_type": "user",
         "member_id_type": "open_id",
         "member_id": open_id
     }
@@ -280,6 +281,7 @@ def add_group_member(tenant_access_token: str, group_id: str, open_id: str) -> D
 def remove_group_member(tenant_access_token: str, group_id: str, open_id: str) -> Dict[str, Any]:
     url = f"https://open.feishu.cn/open-apis/contact/v3/group/{group_id}/member/remove"
     payload = {
+        "member_type": "user",
         "member_id_type": "open_id",
         "member_id": open_id
     }
