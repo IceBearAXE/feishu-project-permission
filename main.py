@@ -534,12 +534,23 @@ def add_group_member(tenant_access_token: str, group_id: str, open_id: str) -> D
         "member_id": open_id
     }
 
-    result = http_json_request(
-        url=url,
-        method="POST",
-        payload=payload,
-        tenant_access_token=tenant_access_token
-    )
+    try:
+        result = http_json_request(
+            url=url,
+            method="POST",
+            payload=payload,
+            tenant_access_token=tenant_access_token
+        )
+    except Exception as e:
+        err = str(e)
+        # 42005: member exist in group
+        if "42005" in err or "member exist in group" in err:
+            print("add group member skipped, member already exists:", open_id, "in", group_id)
+            return {
+                "code": 42005,
+                "msg": "member exist in group"
+            }
+        raise
 
     if result.get("code") != 0:
         if result.get("code") == 42005:
