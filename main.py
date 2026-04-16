@@ -1,3 +1,4 @@
+import time
 from fastapi import FastAPI, Request, Header, HTTPException
 from fastapi.responses import JSONResponse
 import os
@@ -17,6 +18,9 @@ BITABLE_APP_TOKEN = os.getenv("BITABLE_APP_TOKEN", "")
 BITABLE_TABLE_ID = os.getenv("BITABLE_TABLE_ID", "")
 APP_BASE_URL = os.getenv("APP_BASE_URL", "").rstrip("/")
 ADMIN_REFRESH_TOKEN = os.getenv("ADMIN_REFRESH_TOKEN", "")
+ADMIN_ACCESS_TOKEN_CACHE = ""
+ADMIN_ACCESS_TOKEN_EXPIRES_AT = 0
+ADMIN_REFRESH_TOKEN_CACHE = ADMIN_REFRESH_TOKEN
 
 # 这里是文档授权用到的常量
 # 如果第一次跑授权时报 member_type 不合法，就把这里改掉再试
@@ -199,14 +203,7 @@ def build_feishu_admin_login_url() -> str:
     )
 
 
-def _extract_oauth_tokens(result: Dict[str, Any]) -> Dict[str, str]:
-    """
-    兼容不同返回结构：
-    - data.access_token / data.refresh_token
-    - data.user_access_token / data.refresh_token
-    - 顶层 access_token / refresh_token
-    - 顶层 user_access_token / refresh_token
-    """
+def _extract_oauth_tokens(result: Dict[str, Any]) -> Dict[str, Any]:
     data = result.get("data", {}) if isinstance(result.get("data"), dict) else {}
 
     access_token = (
@@ -221,10 +218,16 @@ def _extract_oauth_tokens(result: Dict[str, Any]) -> Dict[str, str]:
         or result.get("refresh_token")
         or ""
     )
+    expires_in = (
+        data.get("expires_in")
+        or result.get("expires_in")
+        or 7200
+    )
 
     return {
         "access_token": str(access_token).strip(),
         "refresh_token": str(refresh_token).strip(),
+        "expires_in": int(expires_in),
     }
 
 
@@ -279,11 +282,30 @@ def refresh_user_access_token(refresh_token: str) -> Dict[str, str]:
 
 
 def get_admin_user_access_token() -> str:
-    if not ADMIN_REFRESH_TOKEN:
+    global ADMIN_ACCESS_TOKEN_CACHE
+    global ADMIN_ACCESS_TOKEN_EXPIRES_AT
+    global ADMIN_REFRESH_TOKEN_CACHE
+
+    now = time.time()
+
+    # access_token 还没过期，就直接用，不要反复刷新
+    if ADMIN_ACCESS_TOKEN_CACHE and now < ADMIN_ACCESS_TOKEN_EXPIRES_AT - 300:
+        return ADMIN_ACCESS_TOKEN_CACHE
+
+    if not ADMIN_REFRESH_TOKEN_CACHE:
         raise RuntimeError("ADMIN_REFRESH_TOKEN is missing")
 
-    tokens = refresh_user_access_token(ADMIN_REFRESH_TOKEN)
-    return tokens["access_token"]
+    tokens = refresh_user_access_token(ADMIN_REFRESH_TOKEN_CACHE)
+
+    ADMIN_ACCESS_TOKEN_CACHE = tokens["access_token"]
+    ADMIN_ACCESS_TOKEN_EXPIRES_AT = now + int(tokens.get("expires_in", 7200))
+
+    # 关键：刷新后 refresh_token 会轮换，要更新内存里的值
+    if tokens.get("refresh_token"):
+        ADMIN_REFRESH_TOKEN_CACHE = tokens["refresh_token"]
+        print("admin refresh_token rotated in memory")
+
+    return ADMIN_ACCESS_TOKEN_CACHE
 
 
 def create_user_group(tenant_access_token: str, group_name: str, description: str = "") -> Dict[str, Any]:
