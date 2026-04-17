@@ -1265,6 +1265,14 @@ async def enable_project(
             external_group_id=external_group_id
         )
 
+        sync_all_project_groups(
+            tenant_access_token=tenant_access_token,
+            fields=fields,
+            leader_group_id=leader_group_id,
+            staff_group_id=staff_group_id,
+            student_group_id=student_group_id,
+            external_group_id=external_group_id,
+        )
         save_authed_project_tokens(
             tenant_access_token=tenant_access_token,
             record_id=record_id,
