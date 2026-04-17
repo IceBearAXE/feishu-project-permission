@@ -474,6 +474,17 @@ def get_admin_user_access_token() -> str:
 
     return ADMIN_ACCESS_TOKEN_CACHE
 
+def get_current_user_info(user_access_token: str) -> Dict[str, Any]:
+    url = "https://open.feishu.cn/open-apis/authen/v1/user_info"
+    result = http_json_request(
+        url=url,
+        method="GET",
+        access_token=user_access_token
+    )
+    if result.get("code") != 0:
+        raise RuntimeError(f"get current user info failed: {result}")
+    return result.get("data", {})
+
 
 # =========================
 # Bitable helpers
@@ -966,41 +977,49 @@ def apply_project_permissions(
     leader_group_id: str,
     staff_group_id: str,
     student_group_id: str,
-    external_group_id: str,
+    external_group_id: str
 ) -> None:
     if main_token and leader_group_id:
+        print("[AUTH] start main folder leader", main_token, leader_group_id, DRIVE_MANAGER_PERMISSION)
         upsert_drive_group_permission(
             access_token=access_token,
             token=main_token,
             member_group_id=leader_group_id,
-            perm=DRIVE_MANAGER_PERMISSION,
+            perm=DRIVE_MANAGER_PERMISSION
         )
+        print("[AUTH] success main folder leader", main_token, leader_group_id, DRIVE_MANAGER_PERMISSION)
 
     if main_token and staff_group_id:
+        print("[AUTH] start main folder staff", main_token, staff_group_id, DRIVE_EDIT_PERMISSION)
         upsert_drive_group_permission(
             access_token=access_token,
             token=main_token,
             member_group_id=staff_group_id,
-            perm=DRIVE_EDIT_PERMISSION,
+            perm=DRIVE_EDIT_PERMISSION
         )
+        print("[AUTH] success main folder staff", main_token, staff_group_id, DRIVE_EDIT_PERMISSION)
 
     for token in student_tokens:
         if student_group_id:
+            print("[AUTH] start student folder", token, student_group_id, DRIVE_EDIT_PERMISSION)
             upsert_drive_group_permission(
                 access_token=access_token,
                 token=token,
                 member_group_id=student_group_id,
-                perm=DRIVE_EDIT_PERMISSION,
+                perm=DRIVE_EDIT_PERMISSION
             )
+            print("[AUTH] success student folder", token, student_group_id, DRIVE_EDIT_PERMISSION)
 
     for token in external_tokens:
         if external_group_id:
+            print("[AUTH] start external folder", token, external_group_id, DRIVE_READ_PERMISSION)
             upsert_drive_group_permission(
                 access_token=access_token,
                 token=token,
                 member_group_id=external_group_id,
-                perm=DRIVE_READ_PERMISSION,
+                perm=DRIVE_READ_PERMISSION
             )
+            print("[AUTH] success external folder", token, external_group_id, DRIVE_READ_PERMISSION)
 
 
 # =========================
@@ -1214,6 +1233,8 @@ async def enable_project(
 
         current_tokens = get_current_project_tokens(fields)
         drive_access_token = get_admin_user_access_token()
+        current_user = get_current_user_info(drive_access_token)
+        print("current admin user info =", json.dumps(current_user, ensure_ascii=False))
 
         apply_project_permissions(
             access_token=drive_access_token,
