@@ -1257,15 +1257,6 @@ async def enable_project(
             },
         )
 
-        sync_all_project_groups(
-            tenant_access_token=tenant_access_token,
-            fields=fields,
-            leader_group_id=leader_group_id,
-            staff_group_id=staff_group_id,
-            student_group_id=student_group_id,
-            external_group_id=external_group_id,
-        )
-
         current_tokens = get_current_project_tokens(fields)
         drive_access_token = get_admin_user_access_token()
 
@@ -1277,7 +1268,7 @@ async def enable_project(
             leader_group_id=leader_group_id,
             staff_group_id=staff_group_id,
             student_group_id=student_group_id,
-            external_group_id=external_group_id
+            external_group_id=external_group_id,
         )
 
         sync_all_project_groups(
