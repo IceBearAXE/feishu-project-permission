@@ -471,26 +471,12 @@ def get_admin_user_access_token() -> str:
     if ADMIN_ACCESS_TOKEN_CACHE and now < ADMIN_ACCESS_TOKEN_EXPIRES_AT - 300:
         return ADMIN_ACCESS_TOKEN_CACHE
 
-    tenant_access_token = get_feishu_tenant_access_token()
-
-    refresh_token = ""
-
-    if ADMIN_REFRESH_TOKEN_CACHE.strip():
-        refresh_token = ADMIN_REFRESH_TOKEN_CACHE.strip()
-        print("using refresh token from memory cache")
-    else:
-        persisted_token = get_persisted_admin_refresh_token(tenant_access_token).strip()
-        if persisted_token:
-            refresh_token = persisted_token
-            ADMIN_REFRESH_TOKEN_CACHE = persisted_token
-            print("using refresh token from config table")
-        elif ADMIN_REFRESH_TOKEN.strip():
-            refresh_token = ADMIN_REFRESH_TOKEN.strip()
-            ADMIN_REFRESH_TOKEN_CACHE = refresh_token
-            print("using refresh token from env fallback")
-
+    refresh_token = ADMIN_REFRESH_TOKEN.strip()
     if not refresh_token:
-        raise RuntimeError("ADMIN_REFRESH_TOKEN is missing")
+        raise RuntimeError("ADMIN_REFRESH_TOKEN is missing in env")
+
+    ADMIN_REFRESH_TOKEN_CACHE = refresh_token
+    print("using refresh token from env only")
 
     tokens = refresh_user_access_token(refresh_token)
 
@@ -499,8 +485,7 @@ def get_admin_user_access_token() -> str:
 
     if tokens.get("refresh_token"):
         ADMIN_REFRESH_TOKEN_CACHE = tokens["refresh_token"]
-        save_persisted_admin_refresh_token(tenant_access_token, tokens["refresh_token"])
-        print("admin refresh_token rotated and persisted")
+        print("admin refresh_token rotated in memory only")
 
     return ADMIN_ACCESS_TOKEN_CACHE
 
