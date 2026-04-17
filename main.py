@@ -1071,21 +1071,21 @@ def apply_project_permissions(
     external_group_id: str
 ) -> None:
     if main_token and leader_group_id:
-    # 第一步：先创建 edit
-    upsert_drive_group_permission(
-        access_token=access_token,
-        token=main_token,
-        member_group_id=leader_group_id,
-        perm=PERM_EDIT
-    )
+        # 第一步：先创建 edit
+        upsert_drive_group_permission(
+            access_token=access_token,
+            token=main_token,
+            member_group_id=leader_group_id,
+            perm=PERM_EDIT
+        )
 
-    # 第二步：再升级成 full_access
-    upsert_drive_group_permission(
-        access_token=access_token,
-        token=main_token,
-        member_group_id=leader_group_id,
-        perm=PERM_FULL_ACCESS
-    )
+        # 第二步：再升级成 full_access
+        upsert_drive_group_permission(
+            access_token=access_token,
+            token=main_token,
+            member_group_id=leader_group_id,
+            perm=PERM_FULL_ACCESS
+        )
 
     if main_token and staff_group_id:
         upsert_drive_group_permission(
