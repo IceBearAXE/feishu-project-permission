@@ -863,6 +863,52 @@ def ensure_user_group(tenant_access_token: str, group_id: str, group_name: str) 
 # =========================
 # Permission helpers
 # =========================
+def upsert_drive_group_permission(
+    access_token: str,
+    token: str,
+    member_group_id: str,
+    perm: str,
+) -> None:
+    file_type = get_drive_type_from_token(token)
+    if not file_type:
+        raise RuntimeError(f"cannot infer file type from token: {token}")
+
+    url = (
+        f"https://open.feishu.cn/open-apis/drive/v1/permissions/{token}/members"
+        f"?type={urllib.parse.quote(file_type)}"
+    )
+
+    payload = {
+        "member_type": DRIVE_GROUP_MEMBER_TYPE,
+        "member_id": member_group_id,
+        "perm": perm,
+    }
+
+    try:
+        result = http_json_request(
+            url=url,
+            method="POST",
+            payload=payload,
+            access_token=access_token,
+        )
+    except Exception as e:
+        err = str(e)
+        if "exist" in err.lower() or "already" in err.lower():
+            print("upsert permission skipped, already exists:", token, member_group_id, perm)
+            return
+        raise
+
+    if result.get("code") != 0:
+        msg = str(result.get("msg", "")).lower()
+        if "exist" in msg or "already" in msg:
+            print("upsert permission skipped, already exists:", token, member_group_id, perm)
+            return
+        raise RuntimeError(f"upsert drive group permission failed: {result}")
+
+    print("create permission success:", token, member_group_id, perm)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
 def upsert_drive_group_permission_with_retry(
     access_token: str,
     token: str,
