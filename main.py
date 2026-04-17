@@ -745,12 +745,21 @@ def delete_user_group(tenant_access_token: str, group_id: str) -> Dict[str, Any]
         )
     except Exception as e:
         err = str(e)
-        if "404" in err or "not found" in err.lower() or "不存在" in err:
-            print("delete user group skipped, already gone:", group_id)
-            return {"code": 0, "msg": "already deleted"}
+        if (
+            "404" in err
+            or "not found" in err.lower()
+            or "不存在" in err
+            or "42002" in err
+            or "invalid group_id" in err
+        ):
+            print("delete user group skipped, invalid or already gone:", group_id)
+            return {"code": 0, "msg": "already deleted or invalid"}
         raise
 
     if result.get("code") != 0:
+        if result.get("code") == 42002:
+            print("delete user group skipped, invalid group_id:", group_id)
+            return {"code": 0, "msg": "already deleted or invalid"}
         raise RuntimeError(f"delete user group failed: {result}")
 
     return result
@@ -823,12 +832,27 @@ def sync_one_group(
 
 
 def clear_user_group_members(tenant_access_token: str, group_id: str) -> None:
-    current_open_ids = list_group_member_open_ids(tenant_access_token, group_id)
+    try:
+        current_open_ids = list_group_member_open_ids(tenant_access_token, group_id)
+    except Exception as e:
+        err = str(e)
+        if "42002" in err or "invalid group_id" in err:
+            print("clear_user_group_members skipped, invalid group_id:", group_id)
+            return
+        raise
+
     print(f"[clear_user_group_members] group {group_id} current members =", current_open_ids)
 
     for open_id in current_open_ids:
-        remove_group_member(tenant_access_token, group_id, open_id)
-        print(f"[clear_user_group_members] removed {open_id} from {group_id}")
+        try:
+            remove_group_member(tenant_access_token, group_id, open_id)
+            print(f"[clear_user_group_members] removed {open_id} from {group_id}")
+        except Exception as e:
+            err = str(e)
+            if "42002" in err or "invalid group_id" in err:
+                print("remove member skipped, invalid group_id:", group_id)
+                return
+            raise
 
 
 def get_drive_type_from_token(token: str) -> str:
@@ -1476,9 +1500,18 @@ async def decommission_project(
 
         # 4) 先清空四个项目用户组成员，再删除用户组
         for gid in [leader_group_id, staff_group_id, student_group_id, external_group_id]:
-            if gid:
+            if not gid:
+                continue
+
+            try:
                 clear_user_group_members(tenant_access_token, gid)
+            except Exception as e:
+                print("clear group members failed but continue:", gid, repr(e))
+
+            try:
                 delete_user_group(tenant_access_token, gid)
+            except Exception as e:
+                print("delete user group failed but continue:", gid, repr(e))
 
         # 5) 回写状态，并清空组ID
         update_bitable_record(
