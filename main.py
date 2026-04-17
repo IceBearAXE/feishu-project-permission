@@ -725,6 +725,63 @@ def remove_group_member(tenant_access_token: str, group_id: str, open_id: str) -
     return result
 
 
+def delete_user_group(tenant_access_token: str, group_id: str) -> Dict[str, Any]:
+    url = f"https://open.feishu.cn/open-apis/contact/v3/group/{group_id}"
+
+    try:
+        result = http_json_request(
+            url=url,
+            method="DELETE",
+            tenant_access_token=tenant_access_token
+        )
+    except Exception as e:
+        err = str(e)
+        if "404" in err or "not found" in err.lower() or "不存在" in err:
+            print("delete user group skipped, already gone:", group_id)
+            return {"code": 0, "msg": "already deleted"}
+        raise
+
+    if result.get("code") != 0:
+        raise RuntimeError(f"delete user group failed: {result}")
+
+    return result
+
+
+def delete_drive_permission_member(
+    access_token: str,
+    token: str,
+    member_id: str
+) -> Dict[str, Any]:
+    file_type = get_drive_type_from_token(token)
+    if not file_type:
+        raise RuntimeError(f"cannot infer file type from token: {token}")
+
+    url = (
+        f"https://open.feishu.cn/open-apis/drive/v1/permissions/{token}/members/"
+        f"{urllib.parse.quote(member_id)}"
+        f"?type={urllib.parse.quote(file_type)}"
+        f"&member_type={urllib.parse.quote(DRIVE_GROUP_MEMBER_TYPE)}"
+    )
+
+    try:
+        result = http_json_request(
+            url=url,
+            method="DELETE",
+            tenant_access_token=access_token
+        )
+    except Exception as e:
+        err = str(e)
+        if "404" in err or "not found" in err.lower() or "不存在" in err:
+            print("delete permission skipped, already gone:", token, member_id)
+            return {"code": 0, "msg": "already deleted"}
+        raise
+
+    if result.get("code") != 0:
+        raise RuntimeError(f"delete drive permission member failed: {result}")
+
+    return result
+
+
 def sync_one_group(
     tenant_access_token: str,
     group_id: str,
@@ -871,6 +928,20 @@ def upsert_drive_group_permission(
             return
 
         raise
+
+
+def remove_drive_group_permission(
+    access_token: str,
+    token: str,
+    member_group_id: str
+) -> None:
+    result = delete_drive_permission_member(
+        access_token=access_token,
+        token=token,
+        member_id=member_group_id
+    )
+    print("delete permission success:", token, member_group_id)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 @app.post("/init_project")
@@ -1247,4 +1318,196 @@ async def sync_members(
 
     return JSONResponse(
         content={"ok": True, "message": "members synced", "record_id": record_id}
+    )
+
+
+@app.post("/decommission_project")
+async def decommission_project(
+    request: Request,
+    x_token: str = Header(default=None),
+    x_source: str = Header(default=None)
+):
+    if WEBHOOK_SECRET and x_token != WEBHOOK_SECRET:
+        raise HTTPException(status_code=401, detail="invalid token")
+
+    raw_bytes = await request.body()
+    raw_text = raw_bytes.decode("utf-8", errors="replace")
+
+    print("====== received /decommission_project ======")
+    print("x_source =", x_source)
+    print("content-type =", request.headers.get("content-type"))
+    print("raw body:")
+    print(raw_text)
+
+    try:
+        body = json.loads(raw_text)
+        print("parsed by normal json.loads")
+    except Exception as e:
+        print("JSON parse error:", repr(e))
+        body = parse_loose_feishu_body(raw_text)
+        print("parsed by loose parser")
+
+    print("parsed body:")
+    print(json.dumps(body, ensure_ascii=False, indent=2))
+
+    record_id = str(body.get("record_id", "")).strip()
+    if not record_id:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "record_id is empty"})
+
+    try:
+        tenant_access_token = get_feishu_tenant_access_token()
+        print("get tenant_access_token success")
+        print("token prefix =", tenant_access_token[:20] + "...")
+    except Exception as e:
+        print("get tenant_access_token failed:", repr(e))
+        return JSONResponse(
+            status_code=500,
+            content={"ok": False, "error": "get_tenant_access_token_failed", "detail": str(e)}
+        )
+
+    try:
+        record_result = get_bitable_record(
+            tenant_access_token=tenant_access_token,
+            record_id=record_id
+        )
+        print("get bitable record success")
+        print(json.dumps(record_result, ensure_ascii=False, indent=2))
+    except Exception as e:
+        print("get bitable record failed:", repr(e))
+        return JSONResponse(
+            status_code=500,
+            content={"ok": False, "error": "get_bitable_record_failed", "detail": str(e), "record_id": record_id}
+        )
+
+    fields = record_result["data"]["record"]["fields"]
+
+    project_name = str(fields.get("项目名称", "")).strip()
+
+    main_folder_link = str(
+        (fields.get("总文件夹链接") or {}).get("link", fields.get("总文件夹链接", ""))
+    ).strip()
+    student_links_value = fields.get("学生权限链接列表", "")
+    external_links_value = fields.get("总体单位权限链接列表", "")
+
+    main_folder_token = extract_drive_token_from_link(main_folder_link)
+    student_tokens = extract_tokens_from_links_field(student_links_value)
+    external_tokens = extract_tokens_from_links_field(external_links_value)
+
+    leader_group_id = str(fields.get("负责人组ID", "")).strip()
+    staff_group_id = str(fields.get("员工组ID", "")).strip()
+    student_group_id = str(fields.get("学生组ID", "")).strip()
+    external_group_id = str(fields.get("总体单位ID", "")).strip()
+
+    print("project_name =", project_name)
+    print("main_folder_token =", main_folder_token)
+    print("student_tokens =", student_tokens)
+    print("external_tokens =", external_tokens)
+    print("leader_group_id =", leader_group_id)
+    print("staff_group_id =", staff_group_id)
+    print("student_group_id =", student_group_id)
+    print("external_group_id =", external_group_id)
+
+    try:
+        update_bitable_record(
+            tenant_access_token=tenant_access_token,
+            record_id=record_id,
+            fields={
+                "停用状态": "处理中",
+                "停用错误信息": ""
+            }
+        )
+    except Exception as e:
+        print("write decommission processing status failed:", repr(e))
+
+    try:
+        drive_access_token = get_admin_user_access_token()
+        print("got admin user_access_token for decommission")
+
+        # 1) 移除总文件夹上的负责人组、员工组权限
+        if main_folder_token and leader_group_id:
+            remove_drive_group_permission(
+                access_token=drive_access_token,
+                token=main_folder_token,
+                member_group_id=leader_group_id
+            )
+
+        if main_folder_token and staff_group_id:
+            remove_drive_group_permission(
+                access_token=drive_access_token,
+                token=main_folder_token,
+                member_group_id=staff_group_id
+            )
+
+        # 2) 移除学生目录上的学生组权限
+        for token in student_tokens:
+            if student_group_id:
+                remove_drive_group_permission(
+                    access_token=drive_access_token,
+                    token=token,
+                    member_group_id=student_group_id
+                )
+
+        # 3) 移除总体单位目录上的总体单位组权限
+        for token in external_tokens:
+            if external_group_id:
+                remove_drive_group_permission(
+                    access_token=drive_access_token,
+                    token=token,
+                    member_group_id=external_group_id
+                )
+
+        # 4) 删除四个项目用户组
+        for gid in [leader_group_id, staff_group_id, student_group_id, external_group_id]:
+            if gid:
+                delete_user_group(tenant_access_token, gid)
+
+        # 5) 回写状态，并清空组ID
+        update_bitable_record(
+            tenant_access_token=tenant_access_token,
+            record_id=record_id,
+            fields={
+                "负责人组ID": "",
+                "员工组ID": "",
+                "学生组ID": "",
+                "总体单位ID": "",
+                "停用状态": "成功",
+                "停用错误信息": "",
+                "授权状态": "已停用",
+                "同步状态": "已停用"
+            }
+        )
+
+        print("decommission success")
+
+    except Exception as e:
+        print("decommission failed:", repr(e))
+        try:
+            update_bitable_record(
+                tenant_access_token=tenant_access_token,
+                record_id=record_id,
+                fields={
+                    "停用状态": "失败",
+                    "停用错误信息": str(e)
+                }
+            )
+        except Exception as e2:
+            print("write decommission error back failed:", repr(e2))
+
+        return JSONResponse(
+            status_code=500,
+            content={
+                "ok": False,
+                "error": "decommission_failed",
+                "detail": str(e),
+                "record_id": record_id
+            }
+        )
+
+    return JSONResponse(
+        content={
+            "ok": True,
+            "message": "project decommissioned",
+            "record_id": record_id,
+            "project_name": project_name
+        }
     )
