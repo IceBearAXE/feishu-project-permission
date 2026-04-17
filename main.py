@@ -863,50 +863,46 @@ def ensure_user_group(tenant_access_token: str, group_id: str, group_name: str) 
 # =========================
 # Permission helpers
 # =========================
-def upsert_drive_group_permission(
+def upsert_drive_group_permission_with_retry(
     access_token: str,
     token: str,
     member_group_id: str,
     perm: str,
+    max_retries: int = 5,
+    sleep_seconds: int = 2
 ) -> None:
-    file_type = get_drive_type_from_token(token)
-    if not file_type:
-        raise RuntimeError(f"cannot infer file type from token: {token}")
+    last_error = None
 
-    url = (
-        f"https://open.feishu.cn/open-apis/drive/v1/permissions/{token}/members"
-        f"?type={urllib.parse.quote(file_type)}"
-    )
-
-    payload = {
-        "member_type": DRIVE_GROUP_MEMBER_TYPE,
-        "member_id": member_group_id,
-        "perm": perm,
-    }
-
-    try:
-        result = http_json_request(
-            url=url,
-            method="POST",
-            payload=payload,
-            access_token=access_token,
-        )
-    except Exception as e:
-        err = str(e)
-        if "exist" in err.lower() or "already" in err.lower():
-            print("upsert permission skipped, already exists:", token, member_group_id, perm)
+    for i in range(max_retries):
+        try:
+            upsert_drive_group_permission(
+                access_token=access_token,
+                token=token,
+                member_group_id=member_group_id,
+                perm=perm
+            )
             return
-        raise
+        except Exception as e:
+            err = str(e)
+            last_error = e
 
-    if result.get("code") != 0:
-        msg = str(result.get("msg", "")).lower()
-        if "exist" in msg or "already" in msg:
-            print("upsert permission skipped, already exists:", token, member_group_id, perm)
-            return
-        raise RuntimeError(f"upsert drive group permission failed: {result}")
+            # 只对这种“刚建组后授权失败”的疑似同步延迟做重试
+            if "1063002" in err or "Permission denied" in err:
+                print(
+                    f"[AUTH RETRY] attempt {i + 1}/{max_retries} failed:",
+                    token,
+                    member_group_id,
+                    perm,
+                    err
+                )
+                if i < max_retries - 1:
+                    time.sleep(sleep_seconds)
+                    continue
 
-    print("create permission success:", token, member_group_id, perm)
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+            raise
+
+    if last_error:
+        raise last_error
 
 
 def delete_drive_permission_member(access_token: str, token: str, member_id: str) -> Dict[str, Any]:
@@ -981,7 +977,7 @@ def apply_project_permissions(
 ) -> None:
     if main_token and leader_group_id:
         print("[AUTH] start main folder leader", main_token, leader_group_id, DRIVE_MANAGER_PERMISSION)
-        upsert_drive_group_permission(
+        upsert_drive_group_permission_with_retry(
             access_token=access_token,
             token=main_token,
             member_group_id=leader_group_id,
@@ -991,7 +987,7 @@ def apply_project_permissions(
 
     if main_token and staff_group_id:
         print("[AUTH] start main folder staff", main_token, staff_group_id, DRIVE_EDIT_PERMISSION)
-        upsert_drive_group_permission(
+        upsert_drive_group_permission_with_retry(
             access_token=access_token,
             token=main_token,
             member_group_id=staff_group_id,
@@ -1002,7 +998,7 @@ def apply_project_permissions(
     for token in student_tokens:
         if student_group_id:
             print("[AUTH] start student folder", token, student_group_id, DRIVE_EDIT_PERMISSION)
-            upsert_drive_group_permission(
+            upsert_drive_group_permission_with_retry(
                 access_token=access_token,
                 token=token,
                 member_group_id=student_group_id,
@@ -1013,7 +1009,7 @@ def apply_project_permissions(
     for token in external_tokens:
         if external_group_id:
             print("[AUTH] start external folder", token, external_group_id, DRIVE_READ_PERMISSION)
-            upsert_drive_group_permission(
+            upsert_drive_group_permission_with_retry(
                 access_token=access_token,
                 token=token,
                 member_group_id=external_group_id,
