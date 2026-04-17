@@ -813,6 +813,15 @@ def sync_one_group(
         print(f"[{role_name}] removed:", open_id)
 
 
+def clear_user_group_members(tenant_access_token: str, group_id: str) -> None:
+    current_open_ids = list_group_member_open_ids(tenant_access_token, group_id)
+    print(f"[clear_user_group_members] group {group_id} current members =", current_open_ids)
+
+    for open_id in current_open_ids:
+        remove_group_member(tenant_access_token, group_id, open_id)
+        print(f"[clear_user_group_members] removed {open_id} from {group_id}")
+
+
 def get_drive_type_from_token(token: str) -> str:
     if not token:
         return ""
@@ -1456,9 +1465,10 @@ async def decommission_project(
                     member_group_id=external_group_id
                 )
 
-        # 4) 删除四个项目用户组
+        # 4) 先清空四个项目用户组成员，再删除用户组
         for gid in [leader_group_id, staff_group_id, student_group_id, external_group_id]:
             if gid:
+                clear_user_group_members(tenant_access_token, gid)
                 delete_user_group(tenant_access_token, gid)
 
         # 5) 回写状态，并清空组ID
