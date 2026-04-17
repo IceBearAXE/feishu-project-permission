@@ -74,7 +74,7 @@ FIELD_AUTHED_EXTERNAL_TOKENS = "已授权总体单位token列表"
 # Permission constants
 # =========================
 DRIVE_GROUP_MEMBER_TYPE = "groupid"
-DRIVE_MANAGER_PERMISSION = "full_access"
+DRIVE_MANAGER_PERMISSION = "edit"
 DRIVE_EDIT_PERMISSION = "edit"
 DRIVE_READ_PERMISSION = "view"
 
