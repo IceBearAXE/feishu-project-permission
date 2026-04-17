@@ -30,7 +30,7 @@ PERM_FULL_ACCESS = "full_access"
 # 管理员 token 运行时缓存
 ADMIN_ACCESS_TOKEN_CACHE = ""
 ADMIN_ACCESS_TOKEN_EXPIRES_AT = 0
-ADMIN_REFRESH_TOKEN_CACHE = ADMIN_REFRESH_TOKEN
+ADMIN_REFRESH_TOKEN_CACHE = ""
 
 
 @app.get("/")
@@ -319,20 +319,29 @@ def get_admin_user_access_token() -> str:
 
     now = time.time()
 
-    # access_token 还没过期，直接复用
+    # 1. access_token 还有效，直接复用
     if ADMIN_ACCESS_TOKEN_CACHE and now < ADMIN_ACCESS_TOKEN_EXPIRES_AT - 300:
         return ADMIN_ACCESS_TOKEN_CACHE
 
     tenant_access_token = get_feishu_tenant_access_token()
 
-    # 优先级：内存 > 配置表 > 环境变量
-    refresh_token = ADMIN_REFRESH_TOKEN_CACHE.strip()
+    # 2. refresh_token 优先级：
+    #    内存缓存 > 配置表 > 环境变量
+    refresh_token = ""
 
-    if not refresh_token:
-        refresh_token = get_persisted_admin_refresh_token(tenant_access_token)
-
-    if not refresh_token:
-        refresh_token = ADMIN_REFRESH_TOKEN.strip()
+    if ADMIN_REFRESH_TOKEN_CACHE.strip():
+        refresh_token = ADMIN_REFRESH_TOKEN_CACHE.strip()
+        print("using refresh token from memory cache")
+    else:
+        persisted_token = get_persisted_admin_refresh_token(tenant_access_token).strip()
+        if persisted_token:
+            refresh_token = persisted_token
+            ADMIN_REFRESH_TOKEN_CACHE = persisted_token
+            print("using refresh token from config table")
+        elif ADMIN_REFRESH_TOKEN.strip():
+            refresh_token = ADMIN_REFRESH_TOKEN.strip()
+            ADMIN_REFRESH_TOKEN_CACHE = refresh_token
+            print("using refresh token from env fallback")
 
     if not refresh_token:
         raise RuntimeError("ADMIN_REFRESH_TOKEN is missing")
