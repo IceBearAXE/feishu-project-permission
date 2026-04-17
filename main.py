@@ -34,7 +34,7 @@ APP_ACCESS_TOKEN_EXPIRES_AT = 0.0
 
 ADMIN_ACCESS_TOKEN_CACHE = ""
 ADMIN_ACCESS_TOKEN_EXPIRES_AT = 0.0
-ADMIN_REFRESH_TOKEN_CACHE = ""  # 不要预置成环境变量，优先从配置表读取
+ADMIN_REFRESH_TOKEN_CACHE = ""
 
 # =========================
 # Field names
@@ -74,9 +74,9 @@ FIELD_AUTHED_EXTERNAL_TOKENS = "已授权总体单位token列表"
 # Permission constants
 # =========================
 DRIVE_GROUP_MEMBER_TYPE = "groupid"
-DRIVE_MANAGER_PERMISSION = "edit"
-DRIVE_EDIT_PERMISSION = "edit"
-DRIVE_READ_PERMISSION = "view"
+PERM_VIEW = "view"
+PERM_EDIT = "edit"
+PERM_FULL_ACCESS = "full_access"
 
 # =========================
 # Basic routes
@@ -134,15 +134,10 @@ def http_json_request(
 
 
 def parse_loose_feishu_body(raw_text: str) -> Dict[str, Any]:
-    """
-    兼容飞书自动化有时发来的“看起来像 JSON 但值没加引号”的 body。
-    当前我们最主要只需要 record_id。
-    """
     text = (raw_text or "").strip()
     if not text:
         return {}
 
-    # 先尝试把简单 bareword 值补上引号
     fixed = re.sub(
         r'(:\s*)([A-Za-z0-9_\-]+)(\s*[,}])',
         lambda m: f'{m.group(1)}"{m.group(2)}"{m.group(3)}',
@@ -155,7 +150,6 @@ def parse_loose_feishu_body(raw_text: str) -> Dict[str, Any]:
     except Exception:
         pass
 
-    # 最后兜底：只抽 record_id
     m = re.search(r'"record_id"\s*:\s*"?(?P<rid>[A-Za-z0-9_\-]+)"?', text)
     if m:
         return {"record_id": m.group("rid")}
@@ -218,14 +212,6 @@ def extract_tokens_from_links_field(value: Any) -> List[str]:
     return sorted(set(tokens))
 
 
-def get_drive_type_from_token(token: str) -> str:
-    # 当前业务场景里你填的都是文件夹链接，所以这里统一按 folder 处理。
-    # 如果后面你真的要支持 doc/wiki/sheet，再扩展这层。
-    if not token:
-        return ""
-    return "folder"
-
-
 def extract_people_open_ids(value: Any) -> List[str]:
     result: List[str] = []
     if not isinstance(value, list):
@@ -270,6 +256,50 @@ def build_project_group_names(fields: Dict[str, Any]) -> Dict[str, str]:
         "student": f"{base}-学生",
         "external": f"{base}-总体单位",
     }
+
+
+def get_current_project_tokens(fields: Dict[str, Any]) -> Dict[str, Any]:
+    main_link = normalize_link_field(fields.get(FIELD_MAIN_FOLDER_LINK))
+    main_token = extract_drive_token_from_link(main_link)
+
+    student_tokens = extract_tokens_from_links_field(fields.get(FIELD_STUDENT_LINKS, ""))
+    external_tokens = extract_tokens_from_links_field(fields.get(FIELD_EXTERNAL_LINKS, ""))
+
+    return {
+        "main_token": main_token,
+        "student_tokens": student_tokens,
+        "external_tokens": external_tokens,
+    }
+
+
+def get_authed_project_tokens(fields: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "main_token": str(fields.get(FIELD_AUTHED_MAIN_TOKEN, "")).strip(),
+        "student_tokens": parse_persisted_token_list(fields.get(FIELD_AUTHED_STUDENT_TOKENS, "")),
+        "external_tokens": parse_persisted_token_list(fields.get(FIELD_AUTHED_EXTERNAL_TOKENS, "")),
+    }
+
+
+async def parse_webhook_request(request: Request, route_name: str) -> Dict[str, Any]:
+    raw_bytes = await request.body()
+    raw_text = raw_bytes.decode("utf-8", errors="replace")
+
+    print(f"====== received {route_name} ======")
+    print("content-type =", request.headers.get("content-type"))
+    print("raw body:")
+    print(raw_text)
+
+    try:
+        body = json.loads(raw_text)
+        print("parsed by normal json.loads")
+    except Exception as e:
+        print("JSON parse error:", repr(e))
+        body = parse_loose_feishu_body(raw_text)
+        print("parsed by loose parser")
+
+    print("parsed body:")
+    print(json.dumps(body, ensure_ascii=False, indent=2))
+    return body
 
 
 # =========================
@@ -474,17 +504,6 @@ def get_admin_user_access_token() -> str:
 
     return ADMIN_ACCESS_TOKEN_CACHE
 
-def get_current_user_info(user_access_token: str) -> Dict[str, Any]:
-    url = "https://open.feishu.cn/open-apis/authen/v1/user_info"
-    result = http_json_request(
-        url=url,
-        method="GET",
-        access_token=user_access_token
-    )
-    if result.get("code") != 0:
-        raise RuntimeError(f"get current user info failed: {result}")
-    return result.get("data", {})
-
 
 # =========================
 # Bitable helpers
@@ -645,9 +664,7 @@ def save_persisted_admin_refresh_token(tenant_access_token: str, refresh_token: 
 # =========================
 def create_user_group(tenant_access_token: str, group_name: str) -> str:
     url = "https://open.feishu.cn/open-apis/contact/v3/group"
-    payload = {
-        "name": group_name,
-    }
+    payload = {"name": group_name}
 
     result = http_json_request(
         url=url,
@@ -861,94 +878,126 @@ def ensure_user_group(tenant_access_token: str, group_id: str, group_name: str) 
 
 
 # =========================
-# Permission helpers
+# Permission helpers (restored old implementation)
 # =========================
-def upsert_drive_group_permission(
+def get_drive_type_from_token(token: str) -> str:
+    if not token:
+        return ""
+
+    if token.startswith("fld"):
+        return "folder"
+    if token.startswith("box"):
+        return "file"
+    if token.startswith("doc"):
+        return "docx"
+    if token.startswith("sht"):
+        return "sheet"
+    if token.startswith("wik"):
+        return "wiki"
+
+    return "folder"
+
+
+def create_drive_permission_member(
     access_token: str,
     token: str,
-    member_group_id: str,
-    perm: str,
-) -> None:
-    file_type = get_drive_type_from_token(token)
-    if not file_type:
-        raise RuntimeError(f"cannot infer file type from token: {token}")
-
+    file_type: str,
+    member_id: str,
+    perm: str
+) -> Dict[str, Any]:
     url = (
         f"https://open.feishu.cn/open-apis/drive/v1/permissions/{token}/members"
         f"?type={urllib.parse.quote(file_type)}"
     )
 
     payload = {
+        "member_id": member_id,
         "member_type": DRIVE_GROUP_MEMBER_TYPE,
-        "member_id": member_group_id,
-        "perm": perm,
+        "perm": perm
     }
 
-    try:
-        result = http_json_request(
-            url=url,
-            method="POST",
-            payload=payload,
-            access_token=access_token,
-        )
-    except Exception as e:
-        err = str(e)
-        if "exist" in err.lower() or "already" in err.lower():
-            print("upsert permission skipped, already exists:", token, member_group_id, perm)
-            return
-        raise
+    result = http_json_request(
+        url=url,
+        method="POST",
+        payload=payload,
+        access_token=access_token
+    )
 
     if result.get("code") != 0:
-        msg = str(result.get("msg", "")).lower()
-        if "exist" in msg or "already" in msg:
-            print("upsert permission skipped, already exists:", token, member_group_id, perm)
-            return
-        raise RuntimeError(f"upsert drive group permission failed: {result}")
+        raise RuntimeError(f"create drive permission member failed: {result}")
 
-    print("create permission success:", token, member_group_id, perm)
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return result
 
 
-def upsert_drive_group_permission_with_retry(
+def update_drive_permission_member(
+    access_token: str,
+    token: str,
+    file_type: str,
+    member_id: str,
+    perm: str
+) -> Dict[str, Any]:
+    url = (
+        f"https://open.feishu.cn/open-apis/drive/v1/permissions/{token}/members/"
+        f"{urllib.parse.quote(member_id)}?type={urllib.parse.quote(file_type)}"
+    )
+
+    payload = {
+        "member_type": DRIVE_GROUP_MEMBER_TYPE,
+        "perm": perm
+    }
+
+    result = http_json_request(
+        url=url,
+        method="PUT",
+        payload=payload,
+        access_token=access_token
+    )
+
+    if result.get("code") != 0:
+        raise RuntimeError(f"update drive permission member failed: {result}")
+
+    return result
+
+
+def upsert_drive_group_permission(
     access_token: str,
     token: str,
     member_group_id: str,
-    perm: str,
-    max_retries: int = 5,
-    sleep_seconds: int = 2
+    perm: str
 ) -> None:
-    last_error = None
+    file_type = get_drive_type_from_token(token)
+    if not file_type:
+        raise RuntimeError(f"cannot infer file type from token: {token}")
 
-    for i in range(max_retries):
-        try:
-            upsert_drive_group_permission(
+    try:
+        result = create_drive_permission_member(
+            access_token=access_token,
+            token=token,
+            file_type=file_type,
+            member_id=member_group_id,
+            perm=perm
+        )
+        print("create permission success:", token, member_group_id, perm)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+
+    except Exception as e:
+        err = str(e)
+        print("create permission failed, try update:", err)
+
+        if any(s in err.lower() for s in ["already", "exists", "duplicate"]) or any(s in err for s in ["重复", "已存在"]):
+            result = update_drive_permission_member(
                 access_token=access_token,
                 token=token,
-                member_group_id=member_group_id,
+                file_type=file_type,
+                member_id=member_group_id,
                 perm=perm
             )
+            print("update permission success:", token, member_group_id, perm)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
             return
-        except Exception as e:
-            err = str(e)
-            last_error = e
 
-            # 只对这种“刚建组后授权失败”的疑似同步延迟做重试
-            if "1063002" in err or "Permission denied" in err:
-                print(
-                    f"[AUTH RETRY] attempt {i + 1}/{max_retries} failed:",
-                    token,
-                    member_group_id,
-                    perm,
-                    err
-                )
-                if i < max_retries - 1:
-                    time.sleep(sleep_seconds)
-                    continue
-
-            raise
-
-    if last_error:
-        raise last_error
+        raise
 
 
 def delete_drive_permission_member(access_token: str, token: str, member_id: str) -> Dict[str, Any]:
@@ -963,18 +1012,11 @@ def delete_drive_permission_member(access_token: str, token: str, member_id: str
         f"&member_type={urllib.parse.quote(DRIVE_GROUP_MEMBER_TYPE)}"
     )
 
-    try:
-        result = http_json_request(
-            url=url,
-            method="DELETE",
-            access_token=access_token,
-        )
-    except Exception as e:
-        err = str(e)
-        if "404" in err or "not found" in err.lower() or "不存在" in err:
-            print("delete permission skipped, already gone:", token, member_id)
-            return {"code": 0, "msg": "already deleted"}
-        raise
+    result = http_json_request(
+        url=url,
+        method="DELETE",
+        access_token=access_token,
+    )
 
     if result.get("code") != 0:
         raise RuntimeError(f"delete drive permission member failed: {result}")
@@ -983,13 +1025,20 @@ def delete_drive_permission_member(access_token: str, token: str, member_id: str
 
 
 def remove_drive_group_permission(access_token: str, token: str, member_group_id: str) -> None:
-    result = delete_drive_permission_member(
-        access_token=access_token,
-        token=token,
-        member_id=member_group_id,
-    )
-    print("delete permission success:", token, member_group_id)
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    try:
+        result = delete_drive_permission_member(
+            access_token=access_token,
+            token=token,
+            member_id=member_group_id,
+        )
+        print("delete permission success:", token, member_group_id)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    except Exception as e:
+        err = str(e)
+        if "404" in err or "not found" in err.lower() or "不存在" in err:
+            print("delete permission skipped, already gone:", token, member_group_id)
+            return
+        raise
 
 
 def safe_remove_drive_group_permission(access_token: str, token: str, member_group_id: str) -> None:
@@ -1022,73 +1071,43 @@ def apply_project_permissions(
     external_group_id: str
 ) -> None:
     if main_token and leader_group_id:
-        print("[AUTH] start main folder leader", main_token, leader_group_id, DRIVE_MANAGER_PERMISSION)
-        upsert_drive_group_permission_with_retry(
+        upsert_drive_group_permission(
             access_token=access_token,
             token=main_token,
             member_group_id=leader_group_id,
-            perm=DRIVE_MANAGER_PERMISSION
+            perm=PERM_FULL_ACCESS
         )
-        print("[AUTH] success main folder leader", main_token, leader_group_id, DRIVE_MANAGER_PERMISSION)
 
     if main_token and staff_group_id:
-        print("[AUTH] start main folder staff", main_token, staff_group_id, DRIVE_EDIT_PERMISSION)
-        upsert_drive_group_permission_with_retry(
+        upsert_drive_group_permission(
             access_token=access_token,
             token=main_token,
             member_group_id=staff_group_id,
-            perm=DRIVE_EDIT_PERMISSION
+            perm=PERM_EDIT
         )
-        print("[AUTH] success main folder staff", main_token, staff_group_id, DRIVE_EDIT_PERMISSION)
 
     for token in student_tokens:
         if student_group_id:
-            print("[AUTH] start student folder", token, student_group_id, DRIVE_EDIT_PERMISSION)
-            upsert_drive_group_permission_with_retry(
+            upsert_drive_group_permission(
                 access_token=access_token,
                 token=token,
                 member_group_id=student_group_id,
-                perm=DRIVE_EDIT_PERMISSION
+                perm=PERM_EDIT
             )
-            print("[AUTH] success student folder", token, student_group_id, DRIVE_EDIT_PERMISSION)
 
     for token in external_tokens:
         if external_group_id:
-            print("[AUTH] start external folder", token, external_group_id, DRIVE_READ_PERMISSION)
-            upsert_drive_group_permission_with_retry(
+            upsert_drive_group_permission(
                 access_token=access_token,
                 token=token,
                 member_group_id=external_group_id,
-                perm=DRIVE_READ_PERMISSION
+                perm=PERM_VIEW
             )
-            print("[AUTH] success external folder", token, external_group_id, DRIVE_READ_PERMISSION)
 
 
 # =========================
 # Project token state helpers
 # =========================
-def get_current_project_tokens(fields: Dict[str, Any]) -> Dict[str, Any]:
-    main_link = normalize_link_field(fields.get(FIELD_MAIN_FOLDER_LINK))
-    main_token = extract_drive_token_from_link(main_link)
-
-    student_tokens = extract_tokens_from_links_field(fields.get(FIELD_STUDENT_LINKS, ""))
-    external_tokens = extract_tokens_from_links_field(fields.get(FIELD_EXTERNAL_LINKS, ""))
-
-    return {
-        "main_token": main_token,
-        "student_tokens": student_tokens,
-        "external_tokens": external_tokens,
-    }
-
-
-def get_authed_project_tokens(fields: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "main_token": str(fields.get(FIELD_AUTHED_MAIN_TOKEN, "")).strip(),
-        "student_tokens": parse_persisted_token_list(fields.get(FIELD_AUTHED_STUDENT_TOKENS, "")),
-        "external_tokens": parse_persisted_token_list(fields.get(FIELD_AUTHED_EXTERNAL_TOKENS, "")),
-    }
-
-
 def save_authed_project_tokens(
     tenant_access_token: str,
     record_id: str,
@@ -1165,31 +1184,6 @@ def sync_all_project_groups(
 
 
 # =========================
-# Request parser
-# =========================
-async def parse_webhook_request(request: Request, route_name: str) -> Dict[str, Any]:
-    raw_bytes = await request.body()
-    raw_text = raw_bytes.decode("utf-8", errors="replace")
-
-    print(f"====== received {route_name} ======")
-    print("content-type =", request.headers.get("content-type"))
-    print("raw body:")
-    print(raw_text)
-
-    try:
-        body = json.loads(raw_text)
-        print("parsed by normal json.loads")
-    except Exception as e:
-        print("JSON parse error:", repr(e))
-        body = parse_loose_feishu_body(raw_text)
-        print("parsed by loose parser")
-
-    print("parsed body:")
-    print(json.dumps(body, ensure_ascii=False, indent=2))
-    return body
-
-
-# =========================
 # New routes
 # =========================
 @app.post("/enable_project")
@@ -1252,7 +1246,6 @@ async def enable_project(
             group_names["external"],
         )
 
-        # 先把组ID落表，避免后续半路失败后无法清理
         update_bitable_record(
             tenant_access_token=tenant_access_token,
             record_id=record_id,
@@ -1275,8 +1268,6 @@ async def enable_project(
 
         current_tokens = get_current_project_tokens(fields)
         drive_access_token = get_admin_user_access_token()
-        current_user = get_current_user_info(drive_access_token)
-        print("current admin user info =", json.dumps(current_user, ensure_ascii=False))
 
         apply_project_permissions(
             access_token=drive_access_token,
@@ -1286,7 +1277,7 @@ async def enable_project(
             leader_group_id=leader_group_id,
             staff_group_id=staff_group_id,
             student_group_id=student_group_id,
-            external_group_id=external_group_id,
+            external_group_id=external_group_id
         )
 
         save_authed_project_tokens(
@@ -1438,8 +1429,8 @@ async def sync_project(
             safe_remove_drive_group_permission(drive_access_token, old_main_token, staff_group_id)
 
         if new_main_token:
-            upsert_drive_group_permission(drive_access_token, new_main_token, leader_group_id, DRIVE_MANAGER_PERMISSION)
-            upsert_drive_group_permission(drive_access_token, new_main_token, staff_group_id, DRIVE_EDIT_PERMISSION)
+            upsert_drive_group_permission(drive_access_token, new_main_token, leader_group_id, PERM_FULL_ACCESS)
+            upsert_drive_group_permission(drive_access_token, new_main_token, staff_group_id, PERM_EDIT)
 
         old_student_set = set(old_tokens["student_tokens"])
         new_student_set = set(new_tokens["student_tokens"])
@@ -1448,7 +1439,7 @@ async def sync_project(
             safe_remove_drive_group_permission(drive_access_token, token, student_group_id)
 
         for token in sorted(new_student_set):
-            upsert_drive_group_permission(drive_access_token, token, student_group_id, DRIVE_EDIT_PERMISSION)
+            upsert_drive_group_permission(drive_access_token, token, student_group_id, PERM_EDIT)
 
         old_external_set = set(old_tokens["external_tokens"])
         new_external_set = set(new_tokens["external_tokens"])
@@ -1457,7 +1448,7 @@ async def sync_project(
             safe_remove_drive_group_permission(drive_access_token, token, external_group_id)
 
         for token in sorted(new_external_set):
-            upsert_drive_group_permission(drive_access_token, token, external_group_id, DRIVE_READ_PERMISSION)
+            upsert_drive_group_permission(drive_access_token, token, external_group_id, PERM_VIEW)
 
         save_authed_project_tokens(
             tenant_access_token=tenant_access_token,
