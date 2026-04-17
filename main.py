@@ -57,14 +57,8 @@ FIELD_STAFF_GROUP_ID = "员工组ID"
 FIELD_STUDENT_GROUP_ID = "学生组ID"
 FIELD_EXTERNAL_GROUP_ID = "总体单位ID"
 
-FIELD_INIT_STATUS = "初始化状态"
-FIELD_SYNC_STATUS = "同步状态"
-FIELD_AUTH_STATUS = "授权状态"
-FIELD_DECOMMISSION_STATUS = "停用状态"
-
-FIELD_SYNC_ERROR = "同步错误信息"
-FIELD_AUTH_ERROR = "授权错误信息"
-FIELD_DECOMMISSION_ERROR = "停用错误信息"
+FIELD_EXEC_STATUS = "执行状态"
+FIELD_ERROR_INFO = "错误信息"
 
 FIELD_AUTHED_MAIN_TOKEN = "已授权总文件夹token"
 FIELD_AUTHED_STUDENT_TOKENS = "已授权学生token列表"
@@ -1071,15 +1065,6 @@ def apply_project_permissions(
     external_group_id: str
 ) -> None:
     if main_token and leader_group_id:
-        # 第一步：先创建 edit
-        upsert_drive_group_permission(
-            access_token=access_token,
-            token=main_token,
-            member_group_id=leader_group_id,
-            perm=PERM_EDIT
-        )
-
-        # 第二步：再升级成 full_access
         upsert_drive_group_permission(
             access_token=access_token,
             token=main_token,
@@ -1224,11 +1209,8 @@ async def enable_project(
             tenant_access_token=tenant_access_token,
             record_id=record_id,
             fields={
-                FIELD_INIT_STATUS: "处理中",
-                FIELD_SYNC_STATUS: "处理中",
-                FIELD_AUTH_STATUS: "处理中",
-                FIELD_SYNC_ERROR: "",
-                FIELD_AUTH_ERROR: "",
+                FIELD_EXEC_STATUS: "处理中",
+                FIELD_ERROR_INFO: "",
             },
         )
 
@@ -1266,6 +1248,15 @@ async def enable_project(
             },
         )
 
+        sync_all_project_groups(
+        tenant_access_token=tenant_access_token,
+        fields=fields,
+        leader_group_id=leader_group_id,
+        staff_group_id=staff_group_id,
+        student_group_id=student_group_id,
+        external_group_id=external_group_id,
+        )
+
         current_tokens = get_current_project_tokens(fields)
         drive_access_token = get_admin_user_access_token()
 
@@ -1274,15 +1265,6 @@ async def enable_project(
             main_token=current_tokens["main_token"],
             student_tokens=current_tokens["student_tokens"],
             external_tokens=current_tokens["external_tokens"],
-            leader_group_id=leader_group_id,
-            staff_group_id=staff_group_id,
-            student_group_id=student_group_id,
-            external_group_id=external_group_id,
-        )
-
-        sync_all_project_groups(
-            tenant_access_token=tenant_access_token,
-            fields=fields,
             leader_group_id=leader_group_id,
             staff_group_id=staff_group_id,
             student_group_id=student_group_id,
@@ -1304,13 +1286,8 @@ async def enable_project(
                 FIELD_STAFF_GROUP_ID: staff_group_id,
                 FIELD_STUDENT_GROUP_ID: student_group_id,
                 FIELD_EXTERNAL_GROUP_ID: external_group_id,
-                FIELD_INIT_STATUS: "成功",
-                FIELD_SYNC_STATUS: "成功",
-                FIELD_AUTH_STATUS: "成功",
-                FIELD_DECOMMISSION_STATUS: "",
-                FIELD_DECOMMISSION_ERROR: "",
-                FIELD_SYNC_ERROR: "",
-                FIELD_AUTH_ERROR: "",
+                FIELD_EXEC_STATUS: "成功",
+                FIELD_ERROR_INFO: "",
             },
         )
 
@@ -1325,10 +1302,8 @@ async def enable_project(
                 tenant_access_token=tenant_access_token,
                 record_id=record_id,
                 fields={
-                    FIELD_INIT_STATUS: "失败",
-                    FIELD_SYNC_STATUS: "失败",
-                    FIELD_AUTH_STATUS: "失败",
-                    FIELD_AUTH_ERROR: str(e),
+                    FIELD_EXEC_STATUS: "失败",
+                    FIELD_ERROR_INFO: str(e),
                 },
             )
         except Exception as e2:
@@ -1374,10 +1349,8 @@ async def sync_project(
             tenant_access_token=tenant_access_token,
             record_id=record_id,
             fields={
-                FIELD_SYNC_STATUS: "处理中",
-                FIELD_AUTH_STATUS: "处理中",
-                FIELD_SYNC_ERROR: "",
-                FIELD_AUTH_ERROR: "",
+                FIELD_EXEC_STATUS: "处理中",
+                FIELD_ERROR_INFO: "",
             },
         )
 
@@ -1474,10 +1447,8 @@ async def sync_project(
                 FIELD_STAFF_GROUP_ID: staff_group_id,
                 FIELD_STUDENT_GROUP_ID: student_group_id,
                 FIELD_EXTERNAL_GROUP_ID: external_group_id,
-                FIELD_SYNC_STATUS: "成功",
-                FIELD_AUTH_STATUS: "成功",
-                FIELD_SYNC_ERROR: "",
-                FIELD_AUTH_ERROR: "",
+                FIELD_EXEC_STATUS: "成功",
+                FIELD_ERROR_INFO: "",
             },
         )
 
@@ -1492,9 +1463,8 @@ async def sync_project(
                 tenant_access_token=tenant_access_token,
                 record_id=record_id,
                 fields={
-                    FIELD_SYNC_STATUS: "失败",
-                    FIELD_AUTH_STATUS: "失败",
-                    FIELD_AUTH_ERROR: str(e),
+                    FIELD_EXEC_STATUS: "失败",
+                    FIELD_ERROR_INFO: str(e),
                 },
             )
         except Exception as e2:
@@ -1541,9 +1511,9 @@ async def decommission_project(
         student_group_id = str(fields.get(FIELD_STUDENT_GROUP_ID, "")).strip()
         external_group_id = str(fields.get(FIELD_EXTERNAL_GROUP_ID, "")).strip()
 
-        init_status = str(fields.get(FIELD_INIT_STATUS, "")).strip()
+        exec_status = str(fields.get(FIELD_EXEC_STATUS, "")).strip()
         never_enabled = (
-            init_status != "成功"
+            exec_status not in ["成功", "已停用"]
             and not leader_group_id
             and not staff_group_id
             and not student_group_id
@@ -1555,8 +1525,8 @@ async def decommission_project(
                 tenant_access_token=tenant_access_token,
                 record_id=record_id,
                 fields={
-                    FIELD_DECOMMISSION_STATUS: "无需处理",
-                    FIELD_DECOMMISSION_ERROR: "项目尚未启用，无需停用",
+                    FIELD_EXEC_STATUS: "无需处理",
+                    FIELD_ERROR_INFO: "项目尚未启用，无需停用",
                 },
             )
             return JSONResponse(
@@ -1571,8 +1541,8 @@ async def decommission_project(
             tenant_access_token=tenant_access_token,
             record_id=record_id,
             fields={
-                FIELD_DECOMMISSION_STATUS: "处理中",
-                FIELD_DECOMMISSION_ERROR: "",
+                FIELD_EXEC_STATUS: "处理中",
+                FIELD_ERROR_INFO: "",
             },
         )
 
@@ -1624,10 +1594,8 @@ async def decommission_project(
                 FIELD_AUTHED_MAIN_TOKEN: "",
                 FIELD_AUTHED_STUDENT_TOKENS: "",
                 FIELD_AUTHED_EXTERNAL_TOKENS: "",
-                FIELD_DECOMMISSION_STATUS: "成功",
-                FIELD_DECOMMISSION_ERROR: "",
-                FIELD_AUTH_STATUS: "已停用",
-                FIELD_SYNC_STATUS: "已停用",
+                FIELD_EXEC_STATUS: "已停用",
+                FIELD_ERROR_INFO: "",
             },
         )
 
@@ -1648,8 +1616,8 @@ async def decommission_project(
                 tenant_access_token=tenant_access_token,
                 record_id=record_id,
                 fields={
-                    FIELD_DECOMMISSION_STATUS: "失败",
-                    FIELD_DECOMMISSION_ERROR: str(e),
+                    FIELD_EXEC_STATUS: "失败",
+                    FIELD_ERROR_INFO: str(e),
                 },
             )
         except Exception as e2:
