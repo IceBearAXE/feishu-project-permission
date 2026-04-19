@@ -54,6 +54,11 @@ FIELD_STAFF_MEMBERS = "员工"
 FIELD_STUDENT_MEMBERS = "学生"
 FIELD_EXTERNAL_MEMBERS = "总体单位"
 
+FIELD_LEADER_PERM = "负责人权限"
+FIELD_STAFF_PERM = "员工权限"
+FIELD_STUDENT_PERM = "学生权限"
+FIELD_EXTERNAL_PERM = "总体单位权限"
+
 # 旧字段，按人授权方案里不再使用，但保留兼容
 FIELD_LEADER_GROUP_ID = "负责人组ID"
 FIELD_STAFF_GROUP_ID = "员工组ID"
@@ -278,6 +283,37 @@ def get_current_project_people(fields: Dict[str, Any]) -> Dict[str, List[str]]:
         "staff_open_ids": extract_people_open_ids(fields.get(FIELD_STAFF_MEMBERS, [])),
         "student_open_ids": extract_people_open_ids(fields.get(FIELD_STUDENT_MEMBERS, [])),
         "external_open_ids": extract_people_open_ids(fields.get(FIELD_EXTERNAL_MEMBERS, [])),
+    }
+
+def normalize_role_perm(value: Any, default_perm: str) -> str:
+    text = str(value or "").strip()
+
+    mapping = {
+        "查看": PERM_VIEW,
+        "阅读": PERM_VIEW,
+        "view": PERM_VIEW,
+        "read": PERM_VIEW,
+
+        "编辑": PERM_EDIT,
+        "edit": PERM_EDIT,
+
+        "管理": PERM_FULL_ACCESS,
+        "full_access": PERM_FULL_ACCESS,
+        "manage": PERM_FULL_ACCESS,
+    }
+
+    if not text:
+        return default_perm
+
+    return mapping.get(text, default_perm)
+
+
+def get_current_project_perms(fields: Dict[str, Any]) -> Dict[str, str]:
+    return {
+        "leader_perm": normalize_role_perm(fields.get(FIELD_LEADER_PERM), PERM_FULL_ACCESS),
+        "staff_perm": normalize_role_perm(fields.get(FIELD_STAFF_PERM), PERM_EDIT),
+        "student_perm": normalize_role_perm(fields.get(FIELD_STUDENT_PERM), PERM_EDIT),
+        "external_perm": normalize_role_perm(fields.get(FIELD_EXTERNAL_PERM), PERM_VIEW),
     }
 
 
@@ -869,24 +905,25 @@ def apply_person_permissions(
     access_token: str,
     tokens: Dict[str, Any],
     people: Dict[str, List[str]],
+    perms: Dict[str, str],
 ) -> None:
     main_token = tokens["main_token"]
 
     for open_id in people["leader_open_ids"]:
         if main_token:
-            upsert_drive_user_permission(access_token, main_token, open_id, PERM_FULL_ACCESS)
+            upsert_drive_user_permission(access_token, main_token, open_id, perms["leader_perm"])
 
     for open_id in people["staff_open_ids"]:
         if main_token:
-            upsert_drive_user_permission(access_token, main_token, open_id, PERM_EDIT)
+            upsert_drive_user_permission(access_token, main_token, open_id, perms["staff_perm"])
 
     for token in tokens["student_tokens"]:
         for open_id in people["student_open_ids"]:
-            upsert_drive_user_permission(access_token, token, open_id, PERM_EDIT)
+            upsert_drive_user_permission(access_token, token, open_id, perms["student_perm"])
 
     for token in tokens["external_tokens"]:
         for open_id in people["external_open_ids"]:
-            upsert_drive_user_permission(access_token, token, open_id, PERM_VIEW)
+            upsert_drive_user_permission(access_token, token, open_id, perms["external_perm"])
 
 
 def diff_set(old_items: List[str], new_items: List[str]) -> Tuple[Set[str], Set[str], Set[str]]:
@@ -906,6 +943,8 @@ def sync_main_folder_permissions(
     new_leaders: List[str],
     old_staff: List[str],
     new_staff: List[str],
+    leader_perm: str,
+    staff_perm: str,
 ) -> None:
     # 如果总文件夹变了，先从旧 token 移除所有旧授权，再在新 token 上重建。
     if old_main_token and old_main_token != new_main_token:
@@ -924,13 +963,13 @@ def sync_main_folder_permissions(
     for open_id in to_remove:
         safe_remove_drive_user_permission(access_token, new_main_token, open_id)
     for open_id in kept | to_add:
-        upsert_drive_user_permission(access_token, new_main_token, open_id, PERM_FULL_ACCESS)
+        upsert_drive_user_permission(access_token, new_main_token, open_id, leader_perm)
 
     kept, to_add, to_remove = diff_set(old_staff, new_staff)
     for open_id in to_remove:
         safe_remove_drive_user_permission(access_token, new_main_token, open_id)
     for open_id in kept | to_add:
-        upsert_drive_user_permission(access_token, new_main_token, open_id, PERM_EDIT)
+        upsert_drive_user_permission(access_token, new_main_token, open_id, staff_perm)
 
 
 def sync_multi_token_permissions(
@@ -1015,12 +1054,14 @@ async def enable_project(
 
         current_tokens = get_current_project_tokens(fields)
         current_people = get_current_project_people(fields)
+        current_perms = get_current_project_perms(fields)
         drive_access_token = get_admin_user_access_token()
 
         apply_person_permissions(
             access_token=drive_access_token,
             tokens=current_tokens,
             people=current_people,
+            perms=current_perms,
         )
 
         save_authed_project_state(
@@ -1106,6 +1147,7 @@ async def sync_project(
         old_people = get_authed_project_people(fields)
         new_tokens = get_current_project_tokens(fields)
         new_people = get_current_project_people(fields)
+        new_perms = get_current_project_perms(fields)
 
         drive_access_token = get_admin_user_access_token()
 
@@ -1117,6 +1159,8 @@ async def sync_project(
             new_leaders=new_people["leader_open_ids"],
             old_staff=old_people["staff_open_ids"],
             new_staff=new_people["staff_open_ids"],
+            leader_perm=new_perms["leader_perm"],
+            staff_perm=new_perms["staff_perm"],
         )
 
         sync_multi_token_permissions(
@@ -1125,7 +1169,7 @@ async def sync_project(
             new_tokens=new_tokens["student_tokens"],
             old_open_ids=old_people["student_open_ids"],
             new_open_ids=new_people["student_open_ids"],
-            perm=PERM_EDIT,
+            perm=new_perms["student_perm"],
         )
 
         sync_multi_token_permissions(
@@ -1134,7 +1178,7 @@ async def sync_project(
             new_tokens=new_tokens["external_tokens"],
             old_open_ids=old_people["external_open_ids"],
             new_open_ids=new_people["external_open_ids"],
-            perm=PERM_VIEW,
+            perm=new_perms["external_perm"],
         )
 
         save_authed_project_state(
