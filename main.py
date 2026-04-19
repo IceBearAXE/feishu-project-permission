@@ -789,8 +789,9 @@ def upsert_drive_user_permission(
     if not file_type:
         raise RuntimeError(f"cannot infer file type from token: {token}")
 
+    # 先更新，适合“已有协作者改权限”的场景
     try:
-        result = create_drive_permission_member(
+        result = update_drive_permission_member(
             access_token=access_token,
             token=token,
             file_type=file_type,
@@ -798,15 +799,24 @@ def upsert_drive_user_permission(
             member_type=DRIVE_USER_MEMBER_TYPE,
             perm=perm,
         )
-        print("create permission success:", token, member_open_id, perm)
+        print("update permission success:", token, member_open_id, perm)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return
     except Exception as e:
         err = str(e)
-        print("create permission failed, try update:", err)
+        print("update permission failed, try create:", err)
 
-        if any(s in err.lower() for s in ["already", "exists", "duplicate"]) or any(s in err for s in ["重复", "已存在"]):
-            result = update_drive_permission_member(
+        # 只有明确判断“协作者不存在”时，才去创建
+        not_found_keywords = [
+            "404",
+            "not found",
+            "member not found",
+            "不存在",
+            "未找到",
+        ]
+
+        if any(k in err.lower() for k in [x.lower() for x in not_found_keywords]) or any(k in err for k in ["不存在", "未找到"]):
+            result = create_drive_permission_member(
                 access_token=access_token,
                 token=token,
                 file_type=file_type,
@@ -814,9 +824,10 @@ def upsert_drive_user_permission(
                 member_type=DRIVE_USER_MEMBER_TYPE,
                 perm=perm,
             )
-            print("update permission success:", token, member_open_id, perm)
+            print("create permission success:", token, member_open_id, perm)
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return
+
         raise
 
 
