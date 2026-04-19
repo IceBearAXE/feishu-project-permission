@@ -903,30 +903,33 @@ def list_drive_permission_members(
     if not actual_file_type:
         raise RuntimeError(f"cannot infer file type from token: {token}")
 
-    url = "https://open.feishu.cn/open-apis/drive/permission/member/list"
-
     all_members: List[Dict[str, Any]] = []
     page_token = ""
 
     while True:
-        payload: Dict[str, Any] = {
-            "token": token,
+        params = {
             "type": actual_file_type,
-            "page_size": page_size,
+            "page_size": str(page_size),
         }
         if page_token:
-            payload["page_token"] = page_token
+            params["page_token"] = page_token
+
+        url = (
+            f"https://open.feishu.cn/open-apis/drive/v1/permissions/"
+            f"{urllib.parse.quote(token)}/members?"
+            f"{urllib.parse.urlencode(params)}"
+        )
 
         result = http_json_request(
             url=url,
-            method="POST",
-            payload=payload,
+            method="GET",
             access_token=access_token,
         )
 
         if result.get("code") != 0:
             raise RuntimeError(
-                f"list drive permission members failed: token={token}, type={actual_file_type}, result={result}"
+                f"list drive permission members failed: "
+                f"token={token}, type={actual_file_type}, result={result}"
             )
 
         data = result.get("data", {}) or {}
