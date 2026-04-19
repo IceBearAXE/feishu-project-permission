@@ -908,11 +908,15 @@ def list_drive_permission_members(
 
     while True:
         params = {
-            "type": actual_file_type,
             "page_size": str(page_size),
         }
+
         if page_token:
             params["page_token"] = page_token
+
+        # 关键修复：这个接口不要传 type=folder
+        if actual_file_type and actual_file_type != "folder":
+            params["type"] = actual_file_type
 
         url = (
             f"https://open.feishu.cn/open-apis/drive/v1/permissions/"
