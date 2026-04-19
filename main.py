@@ -236,6 +236,35 @@ def get_drive_type_from_token(token: str) -> str:
 
     return "folder"
 
+def delete_drive_permission_member(
+    access_token: str,
+    token: str,
+    member_id: str,
+    member_type: str,
+    file_type: str | None = None,
+) -> Dict[str, Any]:
+    actual_file_type = (file_type or get_drive_type_from_token(token)).strip()
+    if not actual_file_type:
+        raise RuntimeError(f"cannot infer file type from token: {token}")
+
+    url = (
+        f"https://open.feishu.cn/open-apis/drive/v1/permissions/{token}/members/"
+        f"{urllib.parse.quote(member_id)}"
+        f"?type={urllib.parse.quote(actual_file_type)}"
+        f"&member_type={urllib.parse.quote(member_type)}"
+    )
+
+    result = http_json_request(
+        url=url,
+        method="DELETE",
+        access_token=access_token,
+    )
+
+    if result.get("code") != 0:
+        raise RuntimeError(f"delete drive permission member failed: {result}")
+
+    return result
+
 
 def extract_people_open_ids(value: Any) -> List[str]:
     result: List[str] = []
@@ -841,6 +870,7 @@ def safe_remove_drive_permission_member(
     token: str,
     member_id: str,
     member_type: str,
+    file_type: str | None = None,
 ) -> None:
     if not token or not member_id or not member_type:
         return
@@ -851,13 +881,14 @@ def safe_remove_drive_permission_member(
             token=token,
             member_id=member_id,
             member_type=member_type,
+            file_type=file_type,
         )
-        print("delete permission success:", token, member_type, member_id)
+        print("delete permission success:", token, file_type, member_type, member_id)
         print(json.dumps(result, ensure_ascii=False, indent=2))
     except Exception as e:
         err = str(e)
         if "404" in err or "not found" in err.lower() or "不存在" in err:
-            print("delete permission skipped, already gone:", token, member_type, member_id)
+            print("delete permission skipped, already gone:", token, file_type, member_type, member_id)
             return
         raise
 
@@ -865,21 +896,22 @@ def safe_remove_drive_permission_member(
 def list_drive_permission_members(
     access_token: str,
     token: str,
+    file_type: str | None = None,
     page_size: int = 200,
 ) -> List[Dict[str, Any]]:
-    file_type = get_drive_type_from_token(token)
-    if not file_type:
+    actual_file_type = (file_type or get_drive_type_from_token(token)).strip()
+    if not actual_file_type:
         raise RuntimeError(f"cannot infer file type from token: {token}")
 
     url = "https://open.feishu.cn/open-apis/drive/permission/member/list"
 
-    all_items: List[Dict[str, Any]] = []
+    all_members: List[Dict[str, Any]] = []
     page_token = ""
 
     while True:
         payload: Dict[str, Any] = {
             "token": token,
-            "type": file_type,
+            "type": actual_file_type,
             "page_size": page_size,
         }
         if page_token:
@@ -893,14 +925,16 @@ def list_drive_permission_members(
         )
 
         if result.get("code") != 0:
-            raise RuntimeError(f"list drive permission members failed: {result}")
+            raise RuntimeError(
+                f"list drive permission members failed: token={token}, type={actual_file_type}, result={result}"
+            )
 
         data = result.get("data", {}) or {}
-        items = data.get("items", [])
-        if not isinstance(items, list):
-            items = []
+        members = data.get("members", [])
+        if not isinstance(members, list):
+            members = []
 
-        all_items.extend(items)
+        all_members.extend(members)
 
         has_more = bool(data.get("has_more", False))
         page_token = str(data.get("page_token") or data.get("next_page_token") or "").strip()
@@ -908,7 +942,7 @@ def list_drive_permission_members(
         if not has_more or not page_token:
             break
 
-    return all_items
+    return all_members
 
 
 def list_drive_folder_items(
@@ -954,14 +988,14 @@ def list_drive_folder_items(
     return all_items
 
 
-def collect_descendant_tokens_under_folder(
+def collect_descendant_items_under_folder(
     access_token: str,
     root_folder_token: str,
-) -> List[str]:
+) -> List[Dict[str, str]]:
     if not root_folder_token:
         return []
 
-    result_tokens: Set[str] = set()
+    result_items: Dict[str, str] = {root_folder_token: "folder"}
     visited_folders: Set[str] = set()
     queue: List[str] = [root_folder_token]
 
@@ -971,7 +1005,6 @@ def collect_descendant_tokens_under_folder(
             continue
 
         visited_folders.add(folder_token)
-        result_tokens.add(folder_token)
 
         items = list_drive_folder_items(
             access_token=access_token,
@@ -985,30 +1018,45 @@ def collect_descendant_tokens_under_folder(
                 or item.get("obj_token")
                 or ""
             ).strip()
-            item_type = str(
+
+            raw_type = str(
                 item.get("type")
                 or item.get("file_type")
                 or ""
-            ).strip().lower()
+            ).strip()
 
-            if not token:
+            file_type = normalize_drive_item_type(raw_type)
+
+            if not token or not file_type:
+                print("skip unsupported descendant item:", raw_type, token)
                 continue
 
-            result_tokens.add(token)
+            result_items[token] = file_type
 
-            if item_type == "folder" and token not in visited_folders:
+            if file_type == "folder" and token not in visited_folders:
                 queue.append(token)
 
-    return sorted(result_tokens)
+    return [
+        {"token": token, "file_type": file_type}
+        for token, file_type in sorted(result_items.items())
+    ]
 
 
 def remove_all_direct_permissions_in_token(
     access_token: str,
     token: str,
+    file_type: str | None = None,
 ) -> None:
+    actual_file_type = (file_type or get_drive_type_from_token(token)).strip()
+    if not actual_file_type:
+        raise RuntimeError(f"cannot infer file type from token: {token}")
+
+    print("start clear direct permissions for token:", token, "type:", actual_file_type)
+
     members = list_drive_permission_members(
         access_token=access_token,
         token=token,
+        file_type=actual_file_type,
     )
 
     for item in members:
@@ -1020,7 +1068,7 @@ def remove_all_direct_permissions_in_token(
             continue
 
         if perm in ["owner", "full_access_with_transfer_owner"]:
-            print("skip owner-like member:", token, member_type, member_id, perm)
+            print("skip owner-like member:", token, actual_file_type, member_type, member_id, perm)
             continue
 
         safe_remove_drive_permission_member(
@@ -1028,6 +1076,7 @@ def remove_all_direct_permissions_in_token(
             token=token,
             member_id=member_id,
             member_type=member_type,
+            file_type=actual_file_type,
         )
 
 
@@ -1479,28 +1528,43 @@ async def decommission_project(
 
         current_tokens = get_current_project_tokens(fields)
 
-        scope_tokens: Set[str] = set()
+        scope_items: Dict[str, str] = {}
 
         main_token = current_tokens["main_token"] or authed_tokens["main_token"]
         if main_token:
-            scope_tokens.update(
-                collect_descendant_tokens_under_folder(
-                    access_token=drive_access_token,
-                    root_folder_token=main_token,
-                )
-            )
+            scope_items[main_token] = "folder"
+            for item in collect_descendant_items_under_folder(
+                access_token=drive_access_token,
+                root_folder_token=main_token,
+            ):
+                token = str(item.get("token") or "").strip()
+                file_type = str(item.get("file_type") or "").strip()
+                if token and file_type:
+                    scope_items[token] = file_type
 
-        scope_tokens.update(current_tokens["student_tokens"])
-        scope_tokens.update(current_tokens["external_tokens"])
-        scope_tokens.update(authed_tokens["student_tokens"])
-        scope_tokens.update(authed_tokens["external_tokens"])
+        for token in current_tokens["student_tokens"]:
+            if token and token not in scope_items:
+                scope_items[token] = get_drive_type_from_token(token)
 
-        print("decommission scope tokens:", sorted(scope_tokens))
+        for token in current_tokens["external_tokens"]:
+            if token and token not in scope_items:
+                scope_items[token] = get_drive_type_from_token(token)
 
-        for token in sorted(scope_tokens):
+        for token in authed_tokens["student_tokens"]:
+            if token and token not in scope_items:
+                scope_items[token] = get_drive_type_from_token(token)
+
+        for token in authed_tokens["external_tokens"]:
+            if token and token not in scope_items:
+                scope_items[token] = get_drive_type_from_token(token)
+
+        print("decommission scope items:", json.dumps(scope_items, ensure_ascii=False))
+
+        for token, file_type in sorted(scope_items.items()):
             remove_all_direct_permissions_in_token(
                 access_token=drive_access_token,
                 token=token,
+                file_type=file_type,
             )
 
         clear_authed_state(tenant_access_token, record_id)
