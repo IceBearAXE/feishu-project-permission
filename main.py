@@ -789,46 +789,23 @@ def upsert_drive_user_permission(
     if not file_type:
         raise RuntimeError(f"cannot infer file type from token: {token}")
 
-    # 先更新，适合“已有协作者改权限”的场景
-    try:
-        result = update_drive_permission_member(
-            access_token=access_token,
-            token=token,
-            file_type=file_type,
-            member_id=member_open_id,
-            member_type=DRIVE_USER_MEMBER_TYPE,
-            perm=perm,
-        )
-        print("update permission success:", token, member_open_id, perm)
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-        return
-    except Exception as e:
-        err = str(e)
-        print("update permission failed, try create:", err)
+    # 关键改动：不再先 create 再猜要不要 update
+    # 直接先删旧权限，再按新权限重建
+    safe_remove_drive_user_permission(access_token, token, member_open_id)
 
-        # 只有明确判断“协作者不存在”时，才去创建
-        not_found_keywords = [
-            "404",
-            "not found",
-            "member not found",
-            "不存在",
-            "未找到",
-        ]
+    # 给飞书一点点时间处理删除
+    time.sleep(0.2)
 
-        if any(k in err.lower() for k in [x.lower() for x in not_found_keywords]) or any(k in err for k in ["不存在", "未找到"]):
-            result = create_drive_permission_member(
-                access_token=access_token,
-                token=token,
-                file_type=file_type,
-                member_id=member_open_id,
-                member_type=DRIVE_USER_MEMBER_TYPE,
-                perm=perm,
-            )
-            print("create permission success:", token, member_open_id, perm)
-            print(json.dumps(result, ensure_ascii=False, indent=2))
-            return
-
-        raise
+    result = create_drive_permission_member(
+        access_token=access_token,
+        token=token,
+        file_type=file_type,
+        member_id=member_open_id,
+        member_type=DRIVE_USER_MEMBER_TYPE,
+        perm=perm,
+    )
+    print("replace permission success:", token, member_open_id, perm)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 def delete_drive_permission_member(
