@@ -1041,6 +1041,24 @@ def collect_descendant_items_under_folder(
         for token, file_type in sorted(result_items.items())
     ]
 
+def normalize_drive_item_type(value: Any) -> str:
+    text = str(value or "").strip().lower()
+
+    mapping = {
+        "folder": "folder",
+        "container": "folder",
+        "doc": "docx",
+        "docx": "docx",
+        "document": "docx",
+        "sheet": "sheet",
+        "spreadsheet": "sheet",
+        "file": "file",
+        "box": "file",
+        "wiki": "wiki",
+    }
+
+    return mapping.get(text, "")
+
 
 def remove_all_direct_permissions_in_token(
     access_token: str,
