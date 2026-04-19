@@ -3,7 +3,7 @@ import os
 import re
 import time
 import urllib.parse
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Set, Tuple
 
 import requests
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -42,6 +42,8 @@ ADMIN_REFRESH_TOKEN_CACHE = ""
 FIELD_PROJECT_CODE = "项目编号"
 FIELD_PROJECT_NAME = "项目名称"
 FIELD_PROJECT_STATUS = "项目状态"
+FIELD_EXEC_STATUS = "执行状态"
+FIELD_ERROR_INFO = "错误信息"
 
 FIELD_MAIN_FOLDER_LINK = "总文件夹链接"
 FIELD_STUDENT_LINKS = "学生权限链接列表"
@@ -52,25 +54,31 @@ FIELD_STAFF_MEMBERS = "员工"
 FIELD_STUDENT_MEMBERS = "学生"
 FIELD_EXTERNAL_MEMBERS = "总体单位"
 
+# 旧字段，按人授权方案里不再使用，但保留兼容
 FIELD_LEADER_GROUP_ID = "负责人组ID"
 FIELD_STAFF_GROUP_ID = "员工组ID"
 FIELD_STUDENT_GROUP_ID = "学生组ID"
 FIELD_EXTERNAL_GROUP_ID = "总体单位ID"
 
-FIELD_EXEC_STATUS = "执行状态"
-FIELD_ERROR_INFO = "错误信息"
-
 FIELD_AUTHED_MAIN_TOKEN = "已授权总文件夹token"
 FIELD_AUTHED_STUDENT_TOKENS = "已授权学生token列表"
 FIELD_AUTHED_EXTERNAL_TOKENS = "已授权总体单位token列表"
 
+FIELD_AUTHED_LEADER_OPEN_IDS = "已授权项目负责人open_id列表"
+FIELD_AUTHED_STAFF_OPEN_IDS = "已授权员工open_id列表"
+FIELD_AUTHED_STUDENT_OPEN_IDS = "已授权学生open_id列表"
+FIELD_AUTHED_EXTERNAL_OPEN_IDS = "已授权总体单位open_id列表"
+
 # =========================
 # Permission constants
 # =========================
-DRIVE_GROUP_MEMBER_TYPE = "groupid"
 PERM_VIEW = "view"
 PERM_EDIT = "edit"
 PERM_FULL_ACCESS = "full_access"
+
+# 根据飞书权限接口，用户按 openid 作为 member_type/member_id 传入。
+DRIVE_USER_MEMBER_TYPE = "openid"
+
 
 # =========================
 # Basic routes
@@ -206,6 +214,24 @@ def extract_tokens_from_links_field(value: Any) -> List[str]:
     return sorted(set(tokens))
 
 
+def get_drive_type_from_token(token: str) -> str:
+    if not token:
+        return ""
+
+    if token.startswith("fld"):
+        return "folder"
+    if token.startswith("box"):
+        return "file"
+    if token.startswith("doc"):
+        return "docx"
+    if token.startswith("sht"):
+        return "sheet"
+    if token.startswith("wik"):
+        return "wiki"
+
+    return "folder"
+
+
 def extract_people_open_ids(value: Any) -> List[str]:
     result: List[str] = []
     if not isinstance(value, list):
@@ -221,35 +247,15 @@ def extract_people_open_ids(value: Any) -> List[str]:
     return sorted(set(result))
 
 
-def parse_persisted_token_list(value: Any) -> List[str]:
+def parse_persisted_list(value: Any) -> List[str]:
     text = str(value or "").strip()
     if not text:
         return []
     return sorted(set([x.strip() for x in text.splitlines() if x.strip()]))
 
 
-def serialize_token_list(tokens: List[str]) -> str:
-    return "\n".join(sorted(set([str(x).strip() for x in tokens if str(x).strip()])))
-
-
-def get_project_code(fields: Dict[str, Any]) -> str:
-    project_code = str(fields.get(FIELD_PROJECT_CODE, "")).strip()
-    if project_code:
-        return project_code
-    return str(fields.get(FIELD_PROJECT_NAME, "")).strip()
-
-
-def build_project_group_names(fields: Dict[str, Any]) -> Dict[str, str]:
-    base = get_project_code(fields)
-    if not base:
-        raise RuntimeError("项目编号和项目名称不能同时为空")
-
-    return {
-        "leader": f"{base}-项目负责人",
-        "staff": f"{base}-员工",
-        "student": f"{base}-学生",
-        "external": f"{base}-总体单位",
-    }
+def serialize_list(items: List[str]) -> str:
+    return "\n".join(sorted(set([str(x).strip() for x in items if str(x).strip()])))
 
 
 def get_current_project_tokens(fields: Dict[str, Any]) -> Dict[str, Any]:
@@ -266,11 +272,29 @@ def get_current_project_tokens(fields: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def get_current_project_people(fields: Dict[str, Any]) -> Dict[str, List[str]]:
+    return {
+        "leader_open_ids": extract_people_open_ids(fields.get(FIELD_LEADER_MEMBERS, [])),
+        "staff_open_ids": extract_people_open_ids(fields.get(FIELD_STAFF_MEMBERS, [])),
+        "student_open_ids": extract_people_open_ids(fields.get(FIELD_STUDENT_MEMBERS, [])),
+        "external_open_ids": extract_people_open_ids(fields.get(FIELD_EXTERNAL_MEMBERS, [])),
+    }
+
+
 def get_authed_project_tokens(fields: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "main_token": str(fields.get(FIELD_AUTHED_MAIN_TOKEN, "")).strip(),
-        "student_tokens": parse_persisted_token_list(fields.get(FIELD_AUTHED_STUDENT_TOKENS, "")),
-        "external_tokens": parse_persisted_token_list(fields.get(FIELD_AUTHED_EXTERNAL_TOKENS, "")),
+        "student_tokens": parse_persisted_list(fields.get(FIELD_AUTHED_STUDENT_TOKENS, "")),
+        "external_tokens": parse_persisted_list(fields.get(FIELD_AUTHED_EXTERNAL_TOKENS, "")),
+    }
+
+
+def get_authed_project_people(fields: Dict[str, Any]) -> Dict[str, List[str]]:
+    return {
+        "leader_open_ids": parse_persisted_list(fields.get(FIELD_AUTHED_LEADER_OPEN_IDS, "")),
+        "staff_open_ids": parse_persisted_list(fields.get(FIELD_AUTHED_STAFF_OPEN_IDS, "")),
+        "student_open_ids": parse_persisted_list(fields.get(FIELD_AUTHED_STUDENT_OPEN_IDS, "")),
+        "external_open_ids": parse_persisted_list(fields.get(FIELD_AUTHED_EXTERNAL_OPEN_IDS, "")),
     }
 
 
@@ -654,250 +678,15 @@ def save_persisted_admin_refresh_token(tenant_access_token: str, refresh_token: 
 
 
 # =========================
-# Group helpers
+# Direct permission helpers (person-based)
 # =========================
-def create_user_group(tenant_access_token: str, group_name: str) -> str:
-    url = "https://open.feishu.cn/open-apis/contact/v3/group"
-    payload = {"name": group_name}
-
-    result = http_json_request(
-        url=url,
-        method="POST",
-        payload=payload,
-        access_token=tenant_access_token,
-    )
-
-    if result.get("code") != 0:
-        raise RuntimeError(f"create user group failed: {result}")
-
-    data = result.get("data", {})
-    group_obj = data.get("group", {}) if isinstance(data.get("group"), dict) else {}
-
-    group_id = (
-        str(data.get("group_id", "")).strip()
-        or str(data.get("id", "")).strip()
-        or str(group_obj.get("group_id", "")).strip()
-        or str(group_obj.get("id", "")).strip()
-    )
-
-    if not group_id:
-        raise RuntimeError(f"group_id missing in create user group response: {result}")
-
-    return group_id
-
-
-def list_group_member_open_ids(tenant_access_token: str, group_id: str) -> List[str]:
-    member_ids: List[str] = []
-    page_token = ""
-
-    while True:
-        url = (
-            f"https://open.feishu.cn/open-apis/contact/v3/group/{group_id}/member/simplelist"
-            f"?member_type=user&member_id_type=open_id&page_size=100"
-        )
-        if page_token:
-            url += f"&page_token={page_token}"
-
-        result = http_json_request(
-            url=url,
-            method="GET",
-            access_token=tenant_access_token,
-        )
-
-        print(f"[list_group_member_open_ids] raw result for group {group_id}:")
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-
-        if result.get("code") != 0:
-            raise RuntimeError(f"list group members failed: {result}")
-
-        data = result.get("data", {})
-        items = data.get("memberlist", [])
-        if not isinstance(items, list):
-            items = []
-
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            member_id = str(item.get("member_id", "")).strip()
-            if member_id:
-                member_ids.append(member_id)
-
-        if not data.get("has_more"):
-            break
-
-        page_token = str(data.get("page_token", "")).strip()
-        if not page_token:
-            break
-
-    result_ids: List[str] = []
-    seen = set()
-    for x in member_ids:
-        if x not in seen:
-            seen.add(x)
-            result_ids.append(x)
-
-    print(f"[list_group_member_open_ids] parsed member ids for group {group_id}: {result_ids}")
-    return result_ids
-
-
-def add_group_member(tenant_access_token: str, group_id: str, open_id: str) -> Dict[str, Any]:
-    url = f"https://open.feishu.cn/open-apis/contact/v3/group/{group_id}/member/add"
-    payload = {
-        "member_type": "user",
-        "member_id_type": "open_id",
-        "member_id": open_id,
-    }
-
-    try:
-        result = http_json_request(
-            url=url,
-            method="POST",
-            payload=payload,
-            access_token=tenant_access_token,
-        )
-    except Exception as e:
-        err = str(e)
-        if "42005" in err or "member exist in group" in err:
-            print("add group member skipped, member already exists:", open_id, "in", group_id)
-            return {"code": 42005, "msg": "member exist in group", "skipped": True}
-        raise
-
-    if result.get("code") != 0:
-        if result.get("code") == 42005:
-            print("add group member skipped, member already exists:", open_id, "in", group_id)
-            result["skipped"] = True
-            return result
-        raise RuntimeError(f"add group member failed: {result}")
-
-    result["skipped"] = False
-    return result
-
-
-def remove_group_member(tenant_access_token: str, group_id: str, open_id: str) -> Dict[str, Any]:
-    url = f"https://open.feishu.cn/open-apis/contact/v3/group/{group_id}/member/remove"
-    payload = {
-        "member_type": "user",
-        "member_id_type": "open_id",
-        "member_id": open_id,
-    }
-
-    result = http_json_request(
-        url=url,
-        method="POST",
-        payload=payload,
-        access_token=tenant_access_token,
-    )
-
-    if result.get("code") != 0:
-        raise RuntimeError(f"remove group member failed: {result}")
-
-    return result
-
-
-def delete_user_group(tenant_access_token: str, group_id: str) -> Dict[str, Any]:
-    url = f"https://open.feishu.cn/open-apis/contact/v3/group/{group_id}"
-
-    try:
-        result = http_json_request(
-            url=url,
-            method="DELETE",
-            access_token=tenant_access_token,
-        )
-    except Exception as e:
-        err = str(e)
-        if (
-            "404" in err
-            or "not found" in err.lower()
-            or "不存在" in err
-            or "42002" in err
-            or "invalid group_id" in err.lower()
-        ):
-            print("delete user group skipped, invalid or already gone:", group_id)
-            return {"code": 0, "msg": "already deleted or invalid"}
-        raise
-
-    if result.get("code") != 0:
-        if result.get("code") == 42002:
-            print("delete user group skipped, invalid group_id:", group_id)
-            return {"code": 0, "msg": "already deleted or invalid"}
-        raise RuntimeError(f"delete user group failed: {result}")
-
-    return result
-
-
-def clear_user_group_members(tenant_access_token: str, group_id: str) -> None:
-    try:
-        current_open_ids = list_group_member_open_ids(tenant_access_token, group_id)
-    except Exception as e:
-        err = str(e)
-        if "42002" in err or "invalid group_id" in err.lower():
-            print("clear_user_group_members skipped, invalid group_id:", group_id)
-            return
-        raise
-
-    print(f"[clear_user_group_members] group {group_id} current members =", current_open_ids)
-
-    for open_id in current_open_ids:
-        try:
-            remove_group_member(tenant_access_token, group_id, open_id)
-            print(f"[clear_user_group_members] removed {open_id} from {group_id}")
-        except Exception as e:
-            err = str(e)
-            if "42002" in err or "invalid group_id" in err.lower():
-                print("remove member skipped, invalid group_id:", group_id)
-                return
-            raise
-
-
-def is_valid_group_id(tenant_access_token: str, group_id: str) -> bool:
-    if not group_id:
-        return False
-    try:
-        list_group_member_open_ids(tenant_access_token, group_id)
-        return True
-    except Exception as e:
-        err = str(e)
-        if "42002" in err or "invalid group_id" in err.lower():
-            return False
-        raise
-
-
-def ensure_user_group(tenant_access_token: str, group_id: str, group_name: str) -> str:
-    if group_id and is_valid_group_id(tenant_access_token, group_id):
-        return group_id
-
-    new_group_id = create_user_group(tenant_access_token, group_name)
-    print("created new group:", group_name, new_group_id)
-    return new_group_id
-
-
-# =========================
-# Permission helpers (restored old implementation)
-# =========================
-def get_drive_type_from_token(token: str) -> str:
-    if not token:
-        return ""
-
-    if token.startswith("fld"):
-        return "folder"
-    if token.startswith("box"):
-        return "file"
-    if token.startswith("doc"):
-        return "docx"
-    if token.startswith("sht"):
-        return "sheet"
-    if token.startswith("wik"):
-        return "wiki"
-
-    return "folder"
-
-
 def create_drive_permission_member(
     access_token: str,
     token: str,
     file_type: str,
     member_id: str,
-    perm: str
+    member_type: str,
+    perm: str,
 ) -> Dict[str, Any]:
     url = (
         f"https://open.feishu.cn/open-apis/drive/v1/permissions/{token}/members"
@@ -906,15 +695,15 @@ def create_drive_permission_member(
 
     payload = {
         "member_id": member_id,
-        "member_type": DRIVE_GROUP_MEMBER_TYPE,
-        "perm": perm
+        "member_type": member_type,
+        "perm": perm,
     }
 
     result = http_json_request(
         url=url,
         method="POST",
         payload=payload,
-        access_token=access_token
+        access_token=access_token,
     )
 
     if result.get("code") != 0:
@@ -928,7 +717,8 @@ def update_drive_permission_member(
     token: str,
     file_type: str,
     member_id: str,
-    perm: str
+    member_type: str,
+    perm: str,
 ) -> Dict[str, Any]:
     url = (
         f"https://open.feishu.cn/open-apis/drive/v1/permissions/{token}/members/"
@@ -936,15 +726,15 @@ def update_drive_permission_member(
     )
 
     payload = {
-        "member_type": DRIVE_GROUP_MEMBER_TYPE,
-        "perm": perm
+        "member_type": member_type,
+        "perm": perm,
     }
 
     result = http_json_request(
         url=url,
         method="PUT",
         payload=payload,
-        access_token=access_token
+        access_token=access_token,
     )
 
     if result.get("code") != 0:
@@ -953,11 +743,11 @@ def update_drive_permission_member(
     return result
 
 
-def upsert_drive_group_permission(
+def upsert_drive_user_permission(
     access_token: str,
     token: str,
-    member_group_id: str,
-    perm: str
+    member_open_id: str,
+    perm: str,
 ) -> None:
     file_type = get_drive_type_from_token(token)
     if not file_type:
@@ -968,13 +758,13 @@ def upsert_drive_group_permission(
             access_token=access_token,
             token=token,
             file_type=file_type,
-            member_id=member_group_id,
-            perm=perm
+            member_id=member_open_id,
+            member_type=DRIVE_USER_MEMBER_TYPE,
+            perm=perm,
         )
-        print("create permission success:", token, member_group_id, perm)
+        print("create permission success:", token, member_open_id, perm)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return
-
     except Exception as e:
         err = str(e)
         print("create permission failed, try update:", err)
@@ -984,17 +774,22 @@ def upsert_drive_group_permission(
                 access_token=access_token,
                 token=token,
                 file_type=file_type,
-                member_id=member_group_id,
-                perm=perm
+                member_id=member_open_id,
+                member_type=DRIVE_USER_MEMBER_TYPE,
+                perm=perm,
             )
-            print("update permission success:", token, member_group_id, perm)
+            print("update permission success:", token, member_open_id, perm)
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return
-
         raise
 
 
-def delete_drive_permission_member(access_token: str, token: str, member_id: str) -> Dict[str, Any]:
+def delete_drive_permission_member(
+    access_token: str,
+    token: str,
+    member_id: str,
+    member_type: str,
+) -> Dict[str, Any]:
     file_type = get_drive_type_from_token(token)
     if not file_type:
         raise RuntimeError(f"cannot infer file type from token: {token}")
@@ -1003,7 +798,7 @@ def delete_drive_permission_member(access_token: str, token: str, member_id: str
         f"https://open.feishu.cn/open-apis/drive/v1/permissions/{token}/members/"
         f"{urllib.parse.quote(member_id)}"
         f"?type={urllib.parse.quote(file_type)}"
-        f"&member_type={urllib.parse.quote(DRIVE_GROUP_MEMBER_TYPE)}"
+        f"&member_type={urllib.parse.quote(member_type)}"
     )
 
     result = http_json_request(
@@ -1018,167 +813,171 @@ def delete_drive_permission_member(access_token: str, token: str, member_id: str
     return result
 
 
-def remove_drive_group_permission(access_token: str, token: str, member_group_id: str) -> None:
+def remove_drive_user_permission(access_token: str, token: str, member_open_id: str) -> None:
     try:
         result = delete_drive_permission_member(
             access_token=access_token,
             token=token,
-            member_id=member_group_id,
+            member_id=member_open_id,
+            member_type=DRIVE_USER_MEMBER_TYPE,
         )
-        print("delete permission success:", token, member_group_id)
+        print("delete permission success:", token, member_open_id)
         print(json.dumps(result, ensure_ascii=False, indent=2))
     except Exception as e:
         err = str(e)
         if "404" in err or "not found" in err.lower() or "不存在" in err:
-            print("delete permission skipped, already gone:", token, member_group_id)
+            print("delete permission skipped, already gone:", token, member_open_id)
             return
         raise
 
 
-def safe_remove_drive_group_permission(access_token: str, token: str, member_group_id: str) -> None:
-    if not token or not member_group_id:
+def safe_remove_drive_user_permission(access_token: str, token: str, member_open_id: str) -> None:
+    if not token or not member_open_id:
         return
     try:
-        remove_drive_group_permission(access_token, token, member_group_id)
+        remove_drive_user_permission(access_token, token, member_open_id)
     except Exception as e:
         err = str(e)
-        if (
-            "404" in err
-            or "42002" in err
-            or "not found" in err.lower()
-            or "invalid group_id" in err.lower()
-            or "already deleted" in err.lower()
-        ):
-            print("safe remove permission skipped:", token, member_group_id, err)
+        if "404" in err or "not found" in err.lower() or "already deleted" in err.lower():
+            print("safe remove permission skipped:", token, member_open_id, err)
             return
         raise
 
 
-def apply_project_permissions(
-    access_token: str,
-    main_token: str,
-    student_tokens: List[str],
-    external_tokens: List[str],
-    leader_group_id: str,
-    staff_group_id: str,
-    student_group_id: str,
-    external_group_id: str
-) -> None:
-    if main_token and leader_group_id:
-        upsert_drive_group_permission(
-            access_token=access_token,
-            token=main_token,
-            member_group_id=leader_group_id,
-            perm=PERM_FULL_ACCESS
-        )
-
-    if main_token and staff_group_id:
-        upsert_drive_group_permission(
-            access_token=access_token,
-            token=main_token,
-            member_group_id=staff_group_id,
-            perm=PERM_EDIT
-        )
-
-    for token in student_tokens:
-        if student_group_id:
-            upsert_drive_group_permission(
-                access_token=access_token,
-                token=token,
-                member_group_id=student_group_id,
-                perm=PERM_EDIT
-            )
-
-    for token in external_tokens:
-        if external_group_id:
-            upsert_drive_group_permission(
-                access_token=access_token,
-                token=token,
-                member_group_id=external_group_id,
-                perm=PERM_VIEW
-            )
-
-
-# =========================
-# Project token state helpers
-# =========================
-def save_authed_project_tokens(
+def save_authed_project_state(
     tenant_access_token: str,
     record_id: str,
-    main_token: str,
-    student_tokens: List[str],
-    external_tokens: List[str],
+    tokens: Dict[str, Any],
+    people: Dict[str, List[str]],
 ) -> None:
     update_bitable_record(
         tenant_access_token=tenant_access_token,
         record_id=record_id,
         fields={
-            FIELD_AUTHED_MAIN_TOKEN: main_token,
-            FIELD_AUTHED_STUDENT_TOKENS: serialize_token_list(student_tokens),
-            FIELD_AUTHED_EXTERNAL_TOKENS: serialize_token_list(external_tokens),
+            FIELD_AUTHED_MAIN_TOKEN: tokens["main_token"],
+            FIELD_AUTHED_STUDENT_TOKENS: serialize_list(tokens["student_tokens"]),
+            FIELD_AUTHED_EXTERNAL_TOKENS: serialize_list(tokens["external_tokens"]),
+            FIELD_AUTHED_LEADER_OPEN_IDS: serialize_list(people["leader_open_ids"]),
+            FIELD_AUTHED_STAFF_OPEN_IDS: serialize_list(people["staff_open_ids"]),
+            FIELD_AUTHED_STUDENT_OPEN_IDS: serialize_list(people["student_open_ids"]),
+            FIELD_AUTHED_EXTERNAL_OPEN_IDS: serialize_list(people["external_open_ids"]),
+        },
+    )
+
+
+def apply_person_permissions(
+    access_token: str,
+    tokens: Dict[str, Any],
+    people: Dict[str, List[str]],
+) -> None:
+    main_token = tokens["main_token"]
+
+    for open_id in people["leader_open_ids"]:
+        if main_token:
+            upsert_drive_user_permission(access_token, main_token, open_id, PERM_FULL_ACCESS)
+
+    for open_id in people["staff_open_ids"]:
+        if main_token:
+            upsert_drive_user_permission(access_token, main_token, open_id, PERM_EDIT)
+
+    for token in tokens["student_tokens"]:
+        for open_id in people["student_open_ids"]:
+            upsert_drive_user_permission(access_token, token, open_id, PERM_EDIT)
+
+    for token in tokens["external_tokens"]:
+        for open_id in people["external_open_ids"]:
+            upsert_drive_user_permission(access_token, token, open_id, PERM_VIEW)
+
+
+def diff_set(old_items: List[str], new_items: List[str]) -> Tuple[Set[str], Set[str], Set[str]]:
+    old_set = set(old_items)
+    new_set = set(new_items)
+    kept = old_set & new_set
+    to_add = new_set - old_set
+    to_remove = old_set - new_set
+    return kept, to_add, to_remove
+
+
+def sync_main_folder_permissions(
+    access_token: str,
+    old_main_token: str,
+    new_main_token: str,
+    old_leaders: List[str],
+    new_leaders: List[str],
+    old_staff: List[str],
+    new_staff: List[str],
+) -> None:
+    # 如果总文件夹变了，先从旧 token 移除所有旧授权，再在新 token 上重建。
+    if old_main_token and old_main_token != new_main_token:
+        for open_id in old_leaders:
+            safe_remove_drive_user_permission(access_token, old_main_token, open_id)
+        for open_id in old_staff:
+            safe_remove_drive_user_permission(access_token, old_main_token, open_id)
+
+        old_leaders = []
+        old_staff = []
+
+    if not new_main_token:
+        return
+
+    kept, to_add, to_remove = diff_set(old_leaders, new_leaders)
+    for open_id in to_remove:
+        safe_remove_drive_user_permission(access_token, new_main_token, open_id)
+    for open_id in kept | to_add:
+        upsert_drive_user_permission(access_token, new_main_token, open_id, PERM_FULL_ACCESS)
+
+    kept, to_add, to_remove = diff_set(old_staff, new_staff)
+    for open_id in to_remove:
+        safe_remove_drive_user_permission(access_token, new_main_token, open_id)
+    for open_id in kept | to_add:
+        upsert_drive_user_permission(access_token, new_main_token, open_id, PERM_EDIT)
+
+
+def sync_multi_token_permissions(
+    access_token: str,
+    old_tokens: List[str],
+    new_tokens: List[str],
+    old_open_ids: List[str],
+    new_open_ids: List[str],
+    perm: str,
+) -> None:
+    old_token_set = set(old_tokens)
+    new_token_set = set(new_tokens)
+
+    # 从已移除的 token 上，撤销旧人权限
+    for token in sorted(old_token_set - new_token_set):
+        for open_id in old_open_ids:
+            safe_remove_drive_user_permission(access_token, token, open_id)
+
+    # 对仍存在或新增的 token，按人员 diff 做精确同步
+    for token in sorted(new_token_set):
+        old_ids_for_token = old_open_ids if token in old_token_set else []
+        kept, to_add, to_remove = diff_set(old_ids_for_token, new_open_ids)
+
+        for open_id in to_remove:
+            safe_remove_drive_user_permission(access_token, token, open_id)
+        for open_id in kept | to_add:
+            upsert_drive_user_permission(access_token, token, open_id, perm)
+
+
+def clear_authed_state(tenant_access_token: str, record_id: str) -> None:
+    update_bitable_record(
+        tenant_access_token=tenant_access_token,
+        record_id=record_id,
+        fields={
+            FIELD_AUTHED_MAIN_TOKEN: "",
+            FIELD_AUTHED_STUDENT_TOKENS: "",
+            FIELD_AUTHED_EXTERNAL_TOKENS: "",
+            FIELD_AUTHED_LEADER_OPEN_IDS: "",
+            FIELD_AUTHED_STAFF_OPEN_IDS: "",
+            FIELD_AUTHED_STUDENT_OPEN_IDS: "",
+            FIELD_AUTHED_EXTERNAL_OPEN_IDS: "",
         },
     )
 
 
 # =========================
-# Group sync helpers
-# =========================
-def sync_one_group(
-    tenant_access_token: str,
-    group_id: str,
-    target_open_ids: List[str],
-    role_name: str,
-) -> None:
-    current_open_ids = list_group_member_open_ids(tenant_access_token, group_id)
-
-    target_set: Set[str] = set(target_open_ids)
-    current_set: Set[str] = set(current_open_ids)
-
-    to_add = sorted(target_set - current_set)
-    to_remove = sorted(current_set - target_set)
-
-    print(f"[{role_name}] current =", current_open_ids)
-    print(f"[{role_name}] target  =", target_open_ids)
-    print(f"[{role_name}] to_add  =", to_add)
-    print(f"[{role_name}] to_remove =", to_remove)
-
-    for open_id in to_add:
-        add_result = add_group_member(tenant_access_token, group_id, open_id)
-        if add_result.get("skipped"):
-            print(f"[{role_name}] skipped add:", open_id)
-        else:
-            print(f"[{role_name}] added:", open_id)
-
-    for open_id in to_remove:
-        remove_group_member(tenant_access_token, group_id, open_id)
-        print(f"[{role_name}] removed:", open_id)
-
-
-def sync_all_project_groups(
-    tenant_access_token: str,
-    fields: Dict[str, Any],
-    leader_group_id: str,
-    staff_group_id: str,
-    student_group_id: str,
-    external_group_id: str,
-) -> None:
-    leader_open_ids = extract_people_open_ids(fields.get(FIELD_LEADER_MEMBERS, []))
-    staff_open_ids = extract_people_open_ids(fields.get(FIELD_STAFF_MEMBERS, []))
-    student_open_ids = extract_people_open_ids(fields.get(FIELD_STUDENT_MEMBERS, []))
-    external_open_ids = extract_people_open_ids(fields.get(FIELD_EXTERNAL_MEMBERS, []))
-
-    if leader_group_id:
-        sync_one_group(tenant_access_token, leader_group_id, leader_open_ids, "项目负责人")
-    if staff_group_id:
-        sync_one_group(tenant_access_token, staff_group_id, staff_open_ids, "员工")
-    if student_group_id:
-        sync_one_group(tenant_access_token, student_group_id, student_open_ids, "学生")
-    if external_group_id:
-        sync_one_group(tenant_access_token, external_group_id, external_open_ids, "总体单位")
-
-
-# =========================
-# New routes
+# Routes: enable / sync / decommission
 # =========================
 @app.post("/enable_project")
 async def enable_project(
@@ -1214,78 +1013,27 @@ async def enable_project(
             },
         )
 
-        group_names = build_project_group_names(fields)
-
-        leader_group_id = ensure_user_group(
-            tenant_access_token,
-            str(fields.get(FIELD_LEADER_GROUP_ID, "")).strip(),
-            group_names["leader"],
-        )
-        staff_group_id = ensure_user_group(
-            tenant_access_token,
-            str(fields.get(FIELD_STAFF_GROUP_ID, "")).strip(),
-            group_names["staff"],
-        )
-        student_group_id = ensure_user_group(
-            tenant_access_token,
-            str(fields.get(FIELD_STUDENT_GROUP_ID, "")).strip(),
-            group_names["student"],
-        )
-        external_group_id = ensure_user_group(
-            tenant_access_token,
-            str(fields.get(FIELD_EXTERNAL_GROUP_ID, "")).strip(),
-            group_names["external"],
-        )
-
-        update_bitable_record(
-            tenant_access_token=tenant_access_token,
-            record_id=record_id,
-            fields={
-                FIELD_LEADER_GROUP_ID: leader_group_id,
-                FIELD_STAFF_GROUP_ID: staff_group_id,
-                FIELD_STUDENT_GROUP_ID: student_group_id,
-                FIELD_EXTERNAL_GROUP_ID: external_group_id,
-            },
-        )
-
-        sync_all_project_groups(
-        tenant_access_token=tenant_access_token,
-        fields=fields,
-        leader_group_id=leader_group_id,
-        staff_group_id=staff_group_id,
-        student_group_id=student_group_id,
-        external_group_id=external_group_id,
-        )
-
         current_tokens = get_current_project_tokens(fields)
+        current_people = get_current_project_people(fields)
         drive_access_token = get_admin_user_access_token()
 
-        apply_project_permissions(
+        apply_person_permissions(
             access_token=drive_access_token,
-            main_token=current_tokens["main_token"],
-            student_tokens=current_tokens["student_tokens"],
-            external_tokens=current_tokens["external_tokens"],
-            leader_group_id=leader_group_id,
-            staff_group_id=staff_group_id,
-            student_group_id=student_group_id,
-            external_group_id=external_group_id,
+            tokens=current_tokens,
+            people=current_people,
         )
-        save_authed_project_tokens(
+
+        save_authed_project_state(
             tenant_access_token=tenant_access_token,
             record_id=record_id,
-            main_token=current_tokens["main_token"],
-            student_tokens=current_tokens["student_tokens"],
-            external_tokens=current_tokens["external_tokens"],
+            tokens=current_tokens,
+            people=current_people,
         )
 
         update_bitable_record(
             tenant_access_token=tenant_access_token,
             record_id=record_id,
             fields={
-                FIELD_LEADER_GROUP_ID: leader_group_id,
-                FIELD_STAFF_GROUP_ID: staff_group_id,
-                FIELD_STUDENT_GROUP_ID: student_group_id,
-                FIELD_EXTERNAL_GROUP_ID: external_group_id,
                 FIELD_EXEC_STATUS: "成功",
                 FIELD_ERROR_INFO: "",
             },
@@ -1354,99 +1102,52 @@ async def sync_project(
             },
         )
 
-        group_names = build_project_group_names(fields)
-
-        leader_group_id = ensure_user_group(
-            tenant_access_token,
-            str(fields.get(FIELD_LEADER_GROUP_ID, "")).strip(),
-            group_names["leader"],
-        )
-        staff_group_id = ensure_user_group(
-            tenant_access_token,
-            str(fields.get(FIELD_STAFF_GROUP_ID, "")).strip(),
-            group_names["staff"],
-        )
-        student_group_id = ensure_user_group(
-            tenant_access_token,
-            str(fields.get(FIELD_STUDENT_GROUP_ID, "")).strip(),
-            group_names["student"],
-        )
-        external_group_id = ensure_user_group(
-            tenant_access_token,
-            str(fields.get(FIELD_EXTERNAL_GROUP_ID, "")).strip(),
-            group_names["external"],
-        )
-
-        update_bitable_record(
-            tenant_access_token=tenant_access_token,
-            record_id=record_id,
-            fields={
-                FIELD_LEADER_GROUP_ID: leader_group_id,
-                FIELD_STAFF_GROUP_ID: staff_group_id,
-                FIELD_STUDENT_GROUP_ID: student_group_id,
-                FIELD_EXTERNAL_GROUP_ID: external_group_id,
-            },
-        )
-
-        sync_all_project_groups(
-            tenant_access_token=tenant_access_token,
-            fields=fields,
-            leader_group_id=leader_group_id,
-            staff_group_id=staff_group_id,
-            student_group_id=student_group_id,
-            external_group_id=external_group_id,
-        )
-
         old_tokens = get_authed_project_tokens(fields)
+        old_people = get_authed_project_people(fields)
         new_tokens = get_current_project_tokens(fields)
+        new_people = get_current_project_people(fields)
 
         drive_access_token = get_admin_user_access_token()
 
-        old_main_token = old_tokens["main_token"]
-        new_main_token = new_tokens["main_token"]
+        sync_main_folder_permissions(
+            access_token=drive_access_token,
+            old_main_token=old_tokens["main_token"],
+            new_main_token=new_tokens["main_token"],
+            old_leaders=old_people["leader_open_ids"],
+            new_leaders=new_people["leader_open_ids"],
+            old_staff=old_people["staff_open_ids"],
+            new_staff=new_people["staff_open_ids"],
+        )
 
-        if old_main_token and old_main_token != new_main_token:
-            safe_remove_drive_group_permission(drive_access_token, old_main_token, leader_group_id)
-            safe_remove_drive_group_permission(drive_access_token, old_main_token, staff_group_id)
+        sync_multi_token_permissions(
+            access_token=drive_access_token,
+            old_tokens=old_tokens["student_tokens"],
+            new_tokens=new_tokens["student_tokens"],
+            old_open_ids=old_people["student_open_ids"],
+            new_open_ids=new_people["student_open_ids"],
+            perm=PERM_EDIT,
+        )
 
-        if new_main_token:
-            upsert_drive_group_permission(drive_access_token, new_main_token, leader_group_id, PERM_FULL_ACCESS)
-            upsert_drive_group_permission(drive_access_token, new_main_token, staff_group_id, PERM_EDIT)
+        sync_multi_token_permissions(
+            access_token=drive_access_token,
+            old_tokens=old_tokens["external_tokens"],
+            new_tokens=new_tokens["external_tokens"],
+            old_open_ids=old_people["external_open_ids"],
+            new_open_ids=new_people["external_open_ids"],
+            perm=PERM_VIEW,
+        )
 
-        old_student_set = set(old_tokens["student_tokens"])
-        new_student_set = set(new_tokens["student_tokens"])
-
-        for token in sorted(old_student_set - new_student_set):
-            safe_remove_drive_group_permission(drive_access_token, token, student_group_id)
-
-        for token in sorted(new_student_set):
-            upsert_drive_group_permission(drive_access_token, token, student_group_id, PERM_EDIT)
-
-        old_external_set = set(old_tokens["external_tokens"])
-        new_external_set = set(new_tokens["external_tokens"])
-
-        for token in sorted(old_external_set - new_external_set):
-            safe_remove_drive_group_permission(drive_access_token, token, external_group_id)
-
-        for token in sorted(new_external_set):
-            upsert_drive_group_permission(drive_access_token, token, external_group_id, PERM_VIEW)
-
-        save_authed_project_tokens(
+        save_authed_project_state(
             tenant_access_token=tenant_access_token,
             record_id=record_id,
-            main_token=new_tokens["main_token"],
-            student_tokens=new_tokens["student_tokens"],
-            external_tokens=new_tokens["external_tokens"],
+            tokens=new_tokens,
+            people=new_people,
         )
 
         update_bitable_record(
             tenant_access_token=tenant_access_token,
             record_id=record_id,
             fields={
-                FIELD_LEADER_GROUP_ID: leader_group_id,
-                FIELD_STAFF_GROUP_ID: staff_group_id,
-                FIELD_STUDENT_GROUP_ID: student_group_id,
-                FIELD_EXTERNAL_GROUP_ID: external_group_id,
                 FIELD_EXEC_STATUS: "成功",
                 FIELD_ERROR_INFO: "",
             },
@@ -1506,18 +1207,19 @@ async def decommission_project(
                 content={"ok": True, "message": "skip, project status is not 停用", "record_id": record_id}
             )
 
-        leader_group_id = str(fields.get(FIELD_LEADER_GROUP_ID, "")).strip()
-        staff_group_id = str(fields.get(FIELD_STAFF_GROUP_ID, "")).strip()
-        student_group_id = str(fields.get(FIELD_STUDENT_GROUP_ID, "")).strip()
-        external_group_id = str(fields.get(FIELD_EXTERNAL_GROUP_ID, "")).strip()
-
         exec_status = str(fields.get(FIELD_EXEC_STATUS, "")).strip()
+        authed_tokens = get_authed_project_tokens(fields)
+        authed_people = get_authed_project_people(fields)
+
         never_enabled = (
-            exec_status not in ["成功", "已停用"]
-            and not leader_group_id
-            and not staff_group_id
-            and not student_group_id
-            and not external_group_id
+            exec_status not in ["成功", "已停用", "失败"]
+            and not authed_tokens["main_token"]
+            and not authed_tokens["student_tokens"]
+            and not authed_tokens["external_tokens"]
+            and not authed_people["leader_open_ids"]
+            and not authed_people["staff_open_ids"]
+            and not authed_people["student_open_ids"]
+            and not authed_people["external_open_ids"]
         )
 
         if never_enabled:
@@ -1546,54 +1248,31 @@ async def decommission_project(
             },
         )
 
-        authed_tokens = get_authed_project_tokens(fields)
-        current_tokens = get_current_project_tokens(fields)
-
-        main_token = authed_tokens["main_token"] or current_tokens["main_token"]
-        student_tokens = authed_tokens["student_tokens"] or current_tokens["student_tokens"]
-        external_tokens = authed_tokens["external_tokens"] or current_tokens["external_tokens"]
-
         drive_access_token = get_admin_user_access_token()
         print("got admin user_access_token for decommission")
 
-        if main_token and leader_group_id:
-            safe_remove_drive_group_permission(drive_access_token, main_token, leader_group_id)
-        if main_token and staff_group_id:
-            safe_remove_drive_group_permission(drive_access_token, main_token, staff_group_id)
+        main_token = authed_tokens["main_token"]
+        for open_id in authed_people["leader_open_ids"]:
+            if main_token:
+                safe_remove_drive_user_permission(drive_access_token, main_token, open_id)
+        for open_id in authed_people["staff_open_ids"]:
+            if main_token:
+                safe_remove_drive_user_permission(drive_access_token, main_token, open_id)
 
-        for token in student_tokens:
-            if student_group_id:
-                safe_remove_drive_group_permission(drive_access_token, token, student_group_id)
+        for token in authed_tokens["student_tokens"]:
+            for open_id in authed_people["student_open_ids"]:
+                safe_remove_drive_user_permission(drive_access_token, token, open_id)
 
-        for token in external_tokens:
-            if external_group_id:
-                safe_remove_drive_group_permission(drive_access_token, token, external_group_id)
+        for token in authed_tokens["external_tokens"]:
+            for open_id in authed_people["external_open_ids"]:
+                safe_remove_drive_user_permission(drive_access_token, token, open_id)
 
-        for gid in [leader_group_id, staff_group_id, student_group_id, external_group_id]:
-            if not gid:
-                continue
-
-            try:
-                clear_user_group_members(tenant_access_token, gid)
-            except Exception as e:
-                print("clear group members failed but continue:", gid, repr(e))
-
-            try:
-                delete_user_group(tenant_access_token, gid)
-            except Exception as e:
-                print("delete user group failed but continue:", gid, repr(e))
+        clear_authed_state(tenant_access_token, record_id)
 
         update_bitable_record(
             tenant_access_token=tenant_access_token,
             record_id=record_id,
             fields={
-                FIELD_LEADER_GROUP_ID: "",
-                FIELD_STAFF_GROUP_ID: "",
-                FIELD_STUDENT_GROUP_ID: "",
-                FIELD_EXTERNAL_GROUP_ID: "",
-                FIELD_AUTHED_MAIN_TOKEN: "",
-                FIELD_AUTHED_STUDENT_TOKENS: "",
-                FIELD_AUTHED_EXTERNAL_TOKENS: "",
                 FIELD_EXEC_STATUS: "已停用",
                 FIELD_ERROR_INFO: "",
             },
